@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "consumer": "rolypoly-tk",
+  "paths": {
+    "ncbi_virus_mmseqs_taxdb": "reference_seqs/ncbi_virus/mmseqs/ncbi_virus",
+    "ncbi_virus_diamond_taxdb": "reference_seqs/ncbi_virus/diamond/ncbi_virus.dmnd",
+    "ncbi_virus_taxonomy": "reference_seqs/ncbi_virus/taxonomy",
+    "refseq_ribovirus_mmseqs": "reference_seqs/ncbi_virus/mmseqs/refseq_ribovirus_genomes_cleaned",
+    "refseq_ribovirus_fasta": "reference_seqs/ncbi_virus/refseq_ribovirus_genomes.fasta",
+    "rrna_genome_mapping": "contam/rrna/rrna_to_genome_mapping.parquet",
+    "profile_hmms": "profiles/hmmdbs",
+    "profile_mmseqs": "profiles/mmseqs_dbs"
+  }
+}
