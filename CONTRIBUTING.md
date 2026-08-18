@@ -28,13 +28,9 @@ Similar to RolyPoly's [contributing guidelines](https://github.com/UriNeri/rolyp
   than `/tmp`; reserve `/tmp` for disposable data that cannot matter later.
 
 ## Environment and checks
-
-Run `pixi run lint`, compilation, CLI help, and focused static checks as
-appropriate. `build_data.py` is a construction script: do not create unit tests
-or synthetic fixtures for its internal functions by default. Validation is only needed for the mature databases/formats, and that can be done by the regular rolypoly commands on the newly created DBs etc. Note that some reference downloads or full database builds can take long. only really worth doing if we think the remote changed compared to the local (or if no local, or if really needed).
+`build_data.py` is a construction script: do not create unit tests or synthetic fixtures for its internal functions by default. Validation is only needed for the mature databases/formats, and that can be done by the regular rolypoly commands on the newly created DBs etc. Note that some reference downloads or full database builds can take long. only really worth doing if we think the remote changed compared to the local (or if no local, or if really needed).
 
 ## RolyPoly data contract
-
 Generated bundles must follow `manifests/rolypoly-data.json`. Coordinate any
 path or schema change with the RolyPoly runtime before publishing a bundle.
 
