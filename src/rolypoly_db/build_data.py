@@ -68,6 +68,7 @@ BUILD_STEPS = (
     "ncbi-virus-nucleotide",
     "ncbi-virus-taxdb",
     "pfam",
+    "vfam",
     "rvmt-motifs",
     "uniref50-virus",
     "contamination",
@@ -76,7 +77,7 @@ BUILD_STEPS = (
     "rfam",
 )
 
-# debug args
+# Local debug arguments retained as a copy-paste reference.
 data_dir = Path("/home/neri/Documents/GitHub/rps/rolypoly/data")
 threads = 6
 log_level = "DEBUG"
@@ -92,12 +93,22 @@ clustered_nr_metadata_db = Path(
 clustered_nr_taxonomy_db = Path(
     "/run/media/neri/ssd2/ncbi_nr/ictv_filter/ncbi_clustered_nr/taxonomy4blast.sqlite3"
 )
-clustered_nr_fetch_dir = Path("/run/media/neri/ssd2/ncbi_nr/work/ncbi_clustered_nr")
+clustered_nr_fetch_dir = Path(
+    "/run/media/neri/ssd2/ncbi_nr/work/ncbi_clustered_nr"
+)
 clustered_nr_work_dir = Path("/run/media/neri/ssd2/ncbi_nr/ictv_filter")
 clustered_nr_temp_dir = Path("/run/media/neri/ssd2/ncbi_nr/ictv_filter/temp")
 bgzip_threads = 2
 force = False
 allow_missing_taxonomy = False
+
+# Focused profile refresh:
+# selected_steps = {"rfam", "vfam", "pfam"}
+#
+# Equivalent CLI invocation:
+# pixi run build-data -- --data-dir ../rolypoly/data --threads 6 \
+#     --step rfam --step vfam --step pfam --log-level DEBUG \
+#     --log-file rolypoly_profile_refresh.log
 
 
 @command()
@@ -190,7 +201,7 @@ def build_data(
     ``--step`` to rebuild one or more selected data families.
 
     1. Build geNomad RNA viral HMMs
-    2. Build protein HMMs RdRp-scan, RVMT, Neordrp_v2.1, tsa_2018 and pfam_A_38
+    2. Build protein HMMs RdRp-scan, RVMT, Neordrp_v2.1, tsa_2018 and Pfam 38
     3. Download and prepare rRNA databases SILVA_138.1_SSURef_NR99_tax_silva.fasta and SILVA_138.1_LSURef_NR99_tax_silva.fasta
     4. Download Rfam data.
     5. Download and prepare NCBI ribovirus nucleotide sequences and taxonomy.
@@ -289,6 +300,9 @@ def build_data(
 
     if "pfam" in selected_steps:
         prepare_pfam_rdrps_rt(data_dir, threads, logger)
+
+    if "vfam" in selected_steps:
+        prepare_vfam(data_dir, logger)
 
     if "rvmt-motifs" in selected_steps:
         prepare_rvmt_motifs(data_dir, threads, logger)
@@ -516,6 +530,73 @@ def download_and_extract_rfam(data_dir, logger):
         positional_args=[os.path.join(rfam_extract_path, "Rfam.cm")],
         logger=logger,
     )
+
+
+def prepare_vfam(data_dir, logger: logging.Logger):
+    """Build filtered VFam HMM and MMseqs2 profile databases."""
+    vfam_url = "https://fileshare.lisc.univie.ac.at/vog/latest"
+    metadata_path = os.path.join(data_dir, "profiles", "vfam.annotations.tsv.gz")
+    work_dir = os.path.join(hmmdb_dir, "vfam")
+    archive_path = os.path.join(work_dir, "vfam.raw_algs.tar.gz")
+    msa_dir = os.path.join(work_dir, "msa")
+    os.makedirs(work_dir, exist_ok=True)
+
+    logger.info("Downloading VFam annotations and alignments")
+    fetch_and_extract(
+        url=f"{vfam_url}/vfam.annotations.tsv.gz",
+        fetched_to=metadata_path,
+        extract=False,
+        logger=logger,
+    )
+    fetch_and_extract(
+        url=f"{vfam_url}/vfam.raw_algs.tar.gz",
+        fetched_to=archive_path,
+        extract=False,
+        logger=logger,
+    )
+    extract_tar(Path(archive_path), Path(work_dir), logger)
+
+    vfam_df = pl.read_csv(metadata_path, separator="\t")
+    valid_accessions = set(
+        vfam_df.filter(
+            ~pl.col("ConsensusFunctionalDescription")
+            .str.to_lowercase()
+            .str.contains("hypothetical")
+            & (pl.col("SpeciesCount") > 2)
+        )["#GroupName"].to_list()
+    )
+    removed = 0
+    for msa_path in Path(msa_dir).glob("*.msa"):
+        if msa_path.stem not in valid_accessions:
+            msa_path.unlink()
+            removed += 1
+    logger.info(
+        f"Retained {len(valid_accessions):,} informative VFam accessions; "
+        f"removed {removed:,} alignments"
+    )
+
+    hmmdb_from_directory(
+        msa_dir=msa_dir,
+        output=os.path.join(hmmdb_dir, "vfam.hmm"),
+        msa_pattern="*.msa",
+        info_table=metadata_path,
+        name_col="#GroupName",
+        accs_col="#GroupName",
+        desc_col="ConsensusFunctionalDescription",
+        gath_col=None,
+    )
+    mmseqs_profile_db_from_directory(
+        msa_dir=msa_dir,
+        output=os.path.join(mmseqs_dbs, "vfam", "vfam"),
+        msa_pattern="*.msa",
+        info_table=metadata_path,
+        name_col="#GroupName",
+        accs_col="#GroupName",
+        desc_col="ConsensusFunctionalDescription",
+    )
+
+    shutil.rmtree(work_dir)
+    logger.info("Created filtered VFam HMM and MMseqs2 databases")
 
 
 def prepare_uniref50_viral(data_dir, threads, logger):
@@ -858,13 +939,13 @@ def prepare_pfam_rdrps_rt(data_dir, threads, logger: logging.Logger):
 
     logger.info("Preparing PFAM RdRps and RTs HMM database")
 
-    # PFAM_A_38 RdRps and RTs
+    # Pfam 38.2 RdRps and RTs
     # fetch Pfam-A.hmm.gz to the hmmdb directory and extract into that directory
     pfam_hmm_url = (
-        "https://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam38.0/Pfam-A.hmm.gz"
+        "https://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam38.2/Pfam-A.hmm.gz"
     )
     pfam_msa_url = (
-        "https://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam38.0/Pfam-A.fasta.gz"
+        "https://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam38.2/Pfam-A.fasta.gz"
     )
     pfam_gz_path = os.path.join(hmmdb_dir, "Pfam-A.hmm.gz")
     os.makedirs(hmmdb_dir, exist_ok=True)
@@ -965,6 +1046,7 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
         output=os.path.join(hmmdb_dir, "rvmt.hmm"),
         msa_pattern="ali*/*.FASTA",
         info_table=None,
+        default_description="RdRp"
     )
 
     mmseqs_profile_db_from_directory(
