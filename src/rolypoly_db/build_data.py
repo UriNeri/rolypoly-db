@@ -376,7 +376,7 @@ def prepare_rvmt_mmseqs(data_dir, threads, logger: logging.Logger):
     logger.info(f"Found {len(chimera_ids)} chimeric sequences to exclude")
 
     # Filter out chimeric sequences using rolypoly's filter function
-    cleaned_path = os.path.join(rvmt_dir, "RVMT_cleaned_contigs.fasta")
+    cleaned_path = os.path.join(rvmt_dir, "RVMT_cleaned_contigs.fasta.gz")
     # logger.info("Filtering out chimeric sequences")
     # filter_fasta_by_headers(
     #     fasta_file=contigs_fasta_path,
@@ -460,7 +460,7 @@ def prepare_rvmt_mmseqs(data_dir, threads, logger: logging.Logger):
         logger=logger,
     )
 
-    cleaned_orfs_path = os.path.join(rvmt_dir, "RVMT_cleaned_orfs.faa")
+    cleaned_orfs_path = os.path.join(rvmt_dir, "RVMT_cleaned_orfs.faa.gz")
     logger.info("Filtering out ORFs from chimeric sequences")
     filter_fasta_by_headers(
         fasta_file=rvmt_orfs,
@@ -525,9 +525,10 @@ def prepare_uniref50_viral(data_dir, threads, logger):
     uniref50_viral_fasta = os.path.join(
         data_dir, "reference_seqs/uniref/uniref50_viral.fasta"
     )
+    uniref50_viral_fasta_gz = uniref50_viral_fasta + ".gz"
     fetch_and_extract(
         "https://rest.uniprot.org/uniref/stream?compressed=true&format=fasta&query=%28%28identity%3A0.5%29+AND+%28taxonomy_id%3A10239%29+AND+%28count%3A%5B1+TO+192133%5D%29%29",
-        fetched_to=uniref50_viral_fasta + ".gz",
+        fetched_to=uniref50_viral_fasta_gz,
         extract_to=os.path.dirname(uniref50_viral_fasta),
         expected_file=os.path.basename(uniref50_viral_fasta),
         logger=logger,
@@ -536,9 +537,10 @@ def prepare_uniref50_viral(data_dir, threads, logger):
     uniref50_viral_data = os.path.join(
         data_dir, "reference_seqs/uniref/uniref50_viral.tsv"
     )
+    uniref50_viral_data_gz = uniref50_viral_data + ".gz"
     fetch_and_extract(
         "https://rest.uniprot.org/uniref/stream?compressed=true&fields=id%2Cname%2Ctypes%2Ccount%2Corganism%2Clength%2Cidentity%2Cmembers&format=tsv&query=%28%28identity%3A0.5%29+AND+%28taxonomy_id%3A10239%29+AND+%28count%3A%5B1+TO+192133%5D%29%29",
-        fetched_to=uniref50_viral_data + ".gz",
+        fetched_to=uniref50_viral_data_gz,
         extract_to=os.path.dirname(uniref50_viral_fasta),
         extract=True,
         logger=logger,
@@ -547,7 +549,7 @@ def prepare_uniref50_viral(data_dir, threads, logger):
     # why the hell is it still compressed??? 2 times gzipped???
     from rolypoly.utils.various import extract
 
-    extract(uniref50_viral_data + ".gz", uniref50_viral_data)
+    extract(uniref50_viral_data_gz, uniref50_viral_data)
 
     # remove sequences of uncharacterized/hypothetical proteins, or non-informative such as "polyprotein fragment"
     logger.info("Filtering UniRef50 viral protein sequences")
@@ -580,13 +582,16 @@ def prepare_uniref50_viral(data_dir, threads, logger):
         format="fasta",
         headers=unidf_filtered["header"].to_list(),
         seqs=unidf_filtered["sequence"].to_list(),
-        output_file=uniref50_viral_fasta,
+        output_file=uniref50_viral_fasta_gz,
+    )
+    uniref_df.write_csv(
+        uniref50_viral_data_gz, separator="\t", compression="gzip"
     )
 
-    # clean up temporary gz files
+    # clean up temporary files, keeping the final compressed metadata table
     try:
-        os.remove(uniref50_viral_fasta + ".gz")
-        os.remove(uniref50_viral_data + ".gz")
+        os.remove(uniref50_viral_fasta)
+        os.remove(uniref50_viral_data)
     except FileNotFoundError:
         logger.warning(
             "some temporary files for UniRef50 viral preparation might not have been cleaned."
@@ -620,6 +625,9 @@ def prepare_genomad_rna_viral_markers(data_dir, threads, logger: logging.Logger)
     os.makedirs(genomad_db_dir, exist_ok=True)
     os.makedirs(genomad_markers_dir, exist_ok=True)
     os.makedirs(genomad_alignments_dir, exist_ok=True)
+    genomad_info_table = os.path.join(
+        data_dir, "profiles/genomad_rna_viral_markers_with_annotation.csv.gz"
+    )
 
     # Download metadata and database
     genomad_data = "https://zenodo.org/api/records/14886553/files-archive"  # noqa
@@ -736,7 +744,7 @@ def prepare_genomad_rna_viral_markers(data_dir, threads, logger: logging.Logger)
     )
     metadata_df = metadata_df.vstack(to_fill)
 
-    metadata_df.write_csv(f"{genomad_dir}/rna_viral_markers_with_annotation.csv")
+    metadata_df.write_csv(genomad_info_table, compression="gzip")
 
     # Download MSAs
     logger.info("Downloading geNomad database")
@@ -770,7 +778,7 @@ def prepare_genomad_rna_viral_markers(data_dir, threads, logger: logging.Logger)
         msa_dir=genomad_alignments_dir,
         output=output_hmm,
         msa_pattern="*.faa",
-        info_table=f"{profile_dir}/genomad_rna_viral_markers_with_annotation.csv",
+        info_table=genomad_info_table,
         name_col="MARKER",
         accs_col="ANNOTATION_ACCESSIONS",
         desc_col="ANNOTATION_DESCRIPTION",
@@ -782,7 +790,7 @@ def prepare_genomad_rna_viral_markers(data_dir, threads, logger: logging.Logger)
         output=os.path.join(
             data_dir, "profiles/mmseqs_dbs/genomad/", "rna_viral_markers"
         ),
-        info_table=f"{profile_dir}/genomad_rna_viral_markers_with_annotation.csv",
+        info_table=genomad_info_table,
         msa_pattern="*.faa",
         name_col="MARKER",
         accs_col="ANNOTATION_ACCESSIONS",
@@ -791,14 +799,6 @@ def prepare_genomad_rna_viral_markers(data_dir, threads, logger: logging.Logger)
     # clean up
     try:
         os.remove(f"{genomad_dir}/genomad_metadata_v1.9.tsv.gz")
-        # move the info table to the head folder of profiles (from all dbs)
-        shutil.move(
-            f"{genomad_dir}/rna_viral_markers_with_annotation.csv",
-            os.path.join(
-                data_dir,
-                "profiles/genomad_rna_viral_markers_with_annotation.csv",
-            ),
-        )
         os.remove(f"{genomad_dir}/genomad_msa_v1.9.tar.gz")
         shutil.rmtree(genomad_db_dir)
     except Exception as e:
@@ -995,7 +995,8 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
     # #  sort by number of new_name (most duplicates first)
     # nvpc_descriptions.write_csv(os.path.join(hmmdb_dir, "RVMT/NVPC/NVPC_descriptions.csv"),include_header=True)
 
-    info_table = pl.read_csv(os.path.join(profile_dir, "NVPC_descriptions.csv"))
+    nvpc_info_table = os.path.join(profile_dir, "NVPC_descriptions.csv.gz")
+    info_table = pl.read_csv(nvpc_info_table)
     # remove any msa file that doesn't have a matching profile_accession in the info table
     import glob
 
@@ -1013,7 +1014,7 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
         msa_dir=os.path.join(hmmdb_dir, "RVMT/NVPC/"),
         output=os.path.join(hmmdb_dir, "nvpc.hmm"),
         msa_pattern="msaFiles/*.afa",
-        info_table=os.path.join(profile_dir, "NVPC_descriptions.csv"),
+        info_table=nvpc_info_table,
         accs_col="profile_accession",
         name_col="Name",
         desc_col="Description",
@@ -1026,7 +1027,7 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
         msa_dir=os.path.join(hmmdb_dir, "RVMT/NVPC/msaFiles/"),
         output=os.path.join(mmseqs_dbs, "nvpc/nvpc"),
         msa_pattern="*.afa",
-        info_table=os.path.join(profile_dir, "NVPC_descriptions.csv"),
+        info_table=nvpc_info_table,
         accs_col="profile_accession",
         name_col="Name",
         desc_col="Description",
@@ -1346,7 +1347,7 @@ def prepare_contamination_seqs(data_dir, threads, logger):
 
     # Masking sequences preparation
     rvmt_fasta_path = os.path.join(
-        data_dir, "reference_seqs", "RVMT", "RVMT_cleaned_contigs.fasta"
+        data_dir, "reference_seqs", "RVMT", "RVMT_cleaned_contigs.fasta.gz"
     )
     ncbi_ribovirus_fasta_path = os.path.join(
         data_dir,
@@ -1396,7 +1397,9 @@ def prepare_contamination_seqs(data_dir, threads, logger):
 
     # Apply entropy masking to the deduplicated sequences
     logger.info("Applying entropy masking to combined sequences")
-    entropy_masked_path = os.path.join(masking_dir, "combined_entropy_masked.fasta")
+    entropy_masked_path = os.path.join(
+        masking_dir, "combined_entropy_masked.fasta.gz"
+    )
 
     bbmask(
         in1=deduplicated_fasta,
@@ -1408,7 +1411,7 @@ def prepare_contamination_seqs(data_dir, threads, logger):
 
     # reduce size with kcompress
     logger.info("Compressing sequences with kcompress")
-    compressed_path = os.path.join(masking_dir, "combined_compressed.fasta")
+    compressed_path = os.path.join(masking_dir, "combined_compressed.fasta.gz")
 
     kcompress(
         in1=entropy_masked_path,
@@ -1430,7 +1433,7 @@ def prepare_contamination_seqs(data_dir, threads, logger):
 
     # now a similar process for the orfs
     rvmt_fasta_path = os.path.join(
-        data_dir, "reference_seqs", "RVMT", "RVMT_cleaned_orfs.faa"
+        data_dir, "reference_seqs", "RVMT", "RVMT_cleaned_orfs.faa.gz"
     )
     ncbi_ribovirus_fasta_path = os.path.join(
         data_dir,
@@ -1440,7 +1443,9 @@ def prepare_contamination_seqs(data_dir, threads, logger):
     )
 
     # Deduplicate directly from multiple files (no concatenation needed)
-    deduplicated_fasta = os.path.join(masking_dir, "combined_deduplicated_orfs.faa")
+    deduplicated_fasta = os.path.join(
+        masking_dir, "combined_deduplicated_orfs.faa.gz"
+    )
 
     logger.info(
         f"Deduplicating sequences from {len([rvmt_fasta_path, ncbi_ribovirus_fasta_path])} files"
@@ -1457,9 +1462,7 @@ def prepare_contamination_seqs(data_dir, threads, logger):
 
     # clean up intermediate files
     try:
-        os.remove(deduplicated_fasta)
         os.remove(compressed_path)
-        os.remove(rvmt_fasta_path)
     except Exception as e:
         logger.warning(f"Could not remove intermediate files: {e}")
 
@@ -2488,9 +2491,45 @@ def prepare_ncbi_virus_taxdb(
     )
     representative_mapping = work_dir / "clustered_nr_viral_representatives_ictv.tsv"
     representatives = work_dir / "clustered_nr_representatives.txt"
+    extracted_representatives = work_dir / "clustered_nr_extracted_representatives.tsv"
+    missing_representatives = work_dir / "clustered_nr_missing_representatives.tsv"
 
-    if force or not outputs_are_current(
-        (representative_viral_taxids, representatives), (metadata_db, viral_taxids_txt)
+    representative_viral_taxids_columns = set()
+    if representative_viral_taxids.is_file():
+        try:
+            representative_viral_taxids_columns = set(
+                pl.read_csv(
+                    representative_viral_taxids,
+                    separator="\t",
+                    n_rows=0,
+                ).columns
+            )
+        except Exception:
+            representative_viral_taxids_columns = set()
+    representative_mapping_columns = set()
+    if representative_mapping.is_file():
+        try:
+            representative_mapping_columns = set(
+                pl.read_csv(
+                    representative_mapping,
+                    separator="\t",
+                    n_rows=0,
+                ).columns
+            )
+        except Exception:
+            representative_mapping_columns = set()
+
+    if (
+        force
+        or not {
+            "representative_accession",
+            "member_accession",
+            "ncbi_taxid",
+        }.issubset(representative_viral_taxids_columns)
+        or not outputs_are_current(
+            (representative_viral_taxids, representatives),
+            (metadata_db, viral_taxids_txt),
+        )
     ):
         if metadata_db is None or not metadata_db.is_file():
             raise FileNotFoundError(
@@ -2516,6 +2555,7 @@ def prepare_ncbi_virus_taxdb(
         representative_sql = """
 SELECT DISTINCT
     R.accession AS representative_accession,
+    C.member_accession AS member_accession,
     CAST(C.member_taxid AS TEXT) AS ncbi_taxid
 FROM ClusterInfo C INDEXED BY ClusterInfoIdx_MembTaxid
 JOIN Representative R ON C.representative_id = R.id
@@ -2558,6 +2598,7 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
                 selected = (
                     batch.select(
                         pl.col("representative_accession").cast(pl.String),
+                        pl.col("member_accession").cast(pl.String),
                         pl.col("ncbi_taxid").cast(pl.String),
                     )
                     .drop_nulls()
@@ -2582,7 +2623,7 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
         )
         partial_representatives = representatives.with_suffix(".txt.partial")
         pl.scan_parquet(str(chunk_dir / "*.parquet")).unique().sort(
-            "representative_accession", "ncbi_taxid"
+            "representative_accession", "member_accession", "ncbi_taxid"
         ).sink_csv(partial_representative_viral_taxids, separator="\t")
         (
             pl.scan_csv(partial_representative_viral_taxids, separator="\t")
@@ -2592,7 +2633,13 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
             .sink_csv(partial_representatives, include_header=False)
         )
         partial_representative_viral_taxids.replace(representative_viral_taxids)
-        partial_representatives.replace(representatives)
+        if (
+            representatives.is_file()
+            and representatives.read_bytes() == partial_representatives.read_bytes()
+        ):
+            partial_representatives.unlink()
+        else:
+            partial_representatives.replace(representatives)
         shutil.rmtree(chunk_dir)
         representative_count = (
             pl.scan_csv(representatives, has_header=False, new_columns=["accession"])
@@ -2607,9 +2654,19 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
     else:
         logger.info("Reusing completed ClusteredNR representative selection")
 
-    if force or not outputs_are_current(
-        (representative_mapping,),
-        (representative_viral_taxids, ncbi_taxid_to_ictv),
+    if (
+        force
+        or not {
+            "representative_accession",
+            "member_accession",
+            "member_is_refseq",
+            "ncbi_taxid",
+            "ictv_taxid",
+        }.issubset(representative_mapping_columns)
+        or not outputs_are_current(
+            (representative_mapping,),
+            (representative_viral_taxids, ncbi_taxid_to_ictv),
+        )
     ):
         partial_representative_mapping = representative_mapping.with_suffix(
             ".tsv.partial"
@@ -2620,8 +2677,15 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
                 separator="\t",
                 schema_overrides={
                     "representative_accession": pl.String,
+                    "member_accession": pl.String,
                     "ncbi_taxid": pl.String,
                 },
+            )
+            .with_columns(
+                pl.col("member_accession")
+                .str.contains(r"^[A-Z]{2}_[A-Z0-9]+(?:\.\d+)?$")
+                .fill_null(False)
+                .alias("member_is_refseq")
             )
             .join(
                 pl.scan_csv(
@@ -2632,7 +2696,17 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
                 on="ncbi_taxid",
                 how="left",
             )
-            .sort("representative_accession", "ncbi_taxid")
+            .select(
+                "representative_accession",
+                "member_accession",
+                "member_is_refseq",
+                "ncbi_taxid",
+                "ictv_taxid",
+            )
+            .sort(
+                ["representative_accession", "member_is_refseq", "member_accession"],
+                descending=[False, True, False],
+            )
             .sink_csv(partial_representative_mapping, separator="\t")
         )
         partial_representative_mapping.replace(representative_mapping)
@@ -2640,7 +2714,13 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
         logger.info("Reusing completed representative-to-ICTV mapping")
 
     if force or not outputs_are_current(
-        (final_fasta, source_metadata), (representatives,)
+        (
+            final_fasta,
+            source_metadata,
+            extracted_representatives,
+            missing_representatives,
+        ),
+        (representatives,),
     ):
         if blast_db is None:
             raise ValueError(
@@ -2668,6 +2748,8 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
         partial_metadata.replace(source_metadata)
 
         partial_fasta = final_fasta.with_name(final_fasta.name + ".partial")
+        partial_extracted = extracted_representatives.with_suffix(".tsv.partial")
+        partial_missing = missing_representatives.with_suffix(".tsv.partial")
         log_path = work_dir / "clustered_nr_extract.log"
         chunk_dir = work_dir / "clustered_nr_extract_chunks"
         shutil.rmtree(chunk_dir, ignore_errors=True)
@@ -2683,7 +2765,6 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
             )
 
         extraction_jobs = min(max(1, int(threads)), representative_total)
-        chunk_size = (representative_total + extraction_jobs - 1) // extraction_jobs
         chunk_paths = [
             chunk_dir / f"representatives_{index:03d}.txt"
             for index in range(extraction_jobs)
@@ -2691,17 +2772,13 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
         chunk_files = [path.open("w", encoding="utf-8") for path in chunk_paths]
         try:
             chunk_index = 0
-            chunk_count = 0
             with representatives.open(encoding="utf-8") as accessions:
                 for accession in accessions:
                     accession = accession.strip()
                     if not accession:
                         continue
-                    if chunk_count >= chunk_size:
-                        chunk_index += 1
-                        chunk_count = 0
                     chunk_files[chunk_index].write(f"{accession}\n")
-                    chunk_count += 1
+                    chunk_index = (chunk_index + 1) % extraction_jobs
         finally:
             for chunk_file in chunk_files:
                 chunk_file.close()
@@ -2730,7 +2807,6 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
                             str(chunk_path),
                             "-outfmt",
                             "%f",
-                            "-target_only",
                         ],
                         stdout=stdout,
                         stderr=stderr,
@@ -2740,9 +2816,18 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
                     stdout.close()
                     stderr.close()
                     raise
-                processes.append((process, stdout, stderr, fasta_path, chunk_log))
+                processes.append(
+                    (process, stdout, stderr, chunk_path, fasta_path, chunk_log)
+                )
         except Exception:
-            for process, stdout, stderr, _fasta_path, _chunk_log in processes:
+            for (
+                process,
+                stdout,
+                stderr,
+                _chunk_path,
+                _fasta_path,
+                _chunk_log,
+            ) in processes:
                 if process.poll() is None:
                     process.terminate()
                     process.wait()
@@ -2752,18 +2837,118 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
 
         fasta_parts = []
         failed_chunks = []
-        for process, stdout, stderr, fasta_path, chunk_log in processes:
-            code = process.wait()
-            stdout.close()
-            stderr.close()
-            if code:
-                failed_chunks.append((fasta_path, chunk_log, f"exit {code}"))
-            elif fasta_path.stat().st_size == 0:
-                failed_chunks.append((fasta_path, chunk_log, "empty FASTA"))
-            else:
-                fasta_parts.append(fasta_path)
+        extracted_count = 0
+        missing_count = 0
+        skipped_prefix = "Error: [blastdbcmd] Skipped "
+        allowed_missing_error = (
+            "Error: [blastdbcmd] Entry or entries not found in BLAST database"
+        )
+        partial_extracted.unlink(missing_ok=True)
+        partial_missing.unlink(missing_ok=True)
+        with (
+            partial_extracted.open("w", encoding="utf-8") as extracted,
+            partial_missing.open("w", encoding="utf-8") as missing_output,
+        ):
+            extracted.write("representative_accession\tfasta_accession\n")
+            missing_output.write("representative_accession\treason\n")
+            for (
+                process,
+                stdout,
+                stderr,
+                chunk_path,
+                fasta_path,
+                chunk_log,
+            ) in processes:
+                code = process.wait()
+                stdout.close()
+                stderr.close()
+
+                skipped_accessions = []
+                unexpected_log_lines = []
+                with chunk_log.open(encoding="utf-8") as log_input:
+                    for log_line in log_input:
+                        log_line = log_line.strip()
+                        if not log_line:
+                            continue
+                        if log_line.startswith(skipped_prefix):
+                            skipped_accessions.append(
+                                log_line.removeprefix(skipped_prefix)
+                            )
+                        elif log_line != allowed_missing_error:
+                            unexpected_log_lines.append(log_line)
+
+                if unexpected_log_lines:
+                    failed_chunks.append(
+                        (
+                            fasta_path,
+                            chunk_log,
+                            "; ".join(unexpected_log_lines[:3]),
+                        )
+                    )
+                    continue
+                if code and not skipped_accessions:
+                    failed_chunks.append((fasta_path, chunk_log, f"exit {code}"))
+                    continue
+
+                skipped_in_chunk = set(skipped_accessions)
+                with chunk_path.with_suffix(".missing.tsv").open(
+                    "w", encoding="utf-8"
+                ) as chunk_missing:
+                    for skipped_accession in skipped_accessions:
+                        chunk_missing.write(
+                            f"{skipped_accession}\tnot_found_in_blastdb\n"
+                        )
+                        missing_output.write(
+                            f"{skipped_accession}\tnot_found_in_blastdb\n"
+                        )
+                missing_count += len(skipped_accessions)
+
+                expected_accessions = []
+                with fasta_path.with_suffix(".extracted.tsv").open(
+                    "w", encoding="utf-8"
+                ) as chunk_extracted:
+                    with chunk_path.open(encoding="utf-8") as accessions:
+                        for accession in accessions:
+                            accession = accession.strip()
+                            if accession and accession not in skipped_in_chunk:
+                                expected_accessions.append(accession)
+
+                    fasta_accessions = []
+                    if fasta_path.stat().st_size > 0:
+                        with fasta_path.open(encoding="utf-8") as fasta_input:
+                            for fasta_line in fasta_input:
+                                if fasta_line.startswith(">"):
+                                    fasta_accessions.append(
+                                        fasta_line[1:].split(maxsplit=1)[0]
+                                    )
+
+                    if len(expected_accessions) != len(fasta_accessions):
+                        failed_chunks.append(
+                            (
+                                fasta_path,
+                                chunk_log,
+                                "extracted FASTA count did not match requested "
+                                f"non-skipped accessions "
+                                f"({len(fasta_accessions):,} != "
+                                f"{len(expected_accessions):,})",
+                            )
+                        )
+                        continue
+
+                    for representative, fasta_accession in zip(
+                        expected_accessions, fasta_accessions, strict=True
+                    ):
+                        chunk_extracted.write(
+                            f"{representative}\t{fasta_accession}\n"
+                        )
+                        extracted.write(f"{representative}\t{fasta_accession}\n")
+                    extracted_count += len(fasta_accessions)
+                    if fasta_accessions:
+                        fasta_parts.append(fasta_path)
         if failed_chunks:
             partial_fasta.unlink(missing_ok=True)
+            partial_extracted.unlink(missing_ok=True)
+            partial_missing.unlink(missing_ok=True)
             failed_summary = ", ".join(
                 f"{fasta_path.name} ({reason}; log {chunk_log.name})"
                 for fasta_path, chunk_log, reason in failed_chunks[:5]
@@ -2771,6 +2956,17 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
             raise RuntimeError(
                 f"ClusteredNR FASTA extraction failed for {len(failed_chunks)} "
                 f"chunk(s): {failed_summary}; see {chunk_dir}"
+            )
+        if not fasta_parts:
+            partial_extracted.unlink(missing_ok=True)
+            partial_missing.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"No ClusteredNR representative sequences were extracted; see {chunk_dir}"
+            )
+        if missing_count:
+            logger.warning(
+                f"Skipped {missing_count:,} ClusteredNR representatives absent from "
+                f"the BLAST database; see {missing_representatives}"
             )
 
         with (
@@ -2787,6 +2983,9 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
                 stderr=log,
             )
             if compressor.stdin is None:
+                partial_fasta.unlink(missing_ok=True)
+                partial_extracted.unlink(missing_ok=True)
+                partial_missing.unlink(missing_ok=True)
                 raise RuntimeError("Could not open the bgzip input stream")
             try:
                 for fasta_path in fasta_parts:
@@ -2800,15 +2999,30 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
                     compressor.kill()
                     compressor.wait()
                 partial_fasta.unlink(missing_ok=True)
+                partial_extracted.unlink(missing_ok=True)
+                partial_missing.unlink(missing_ok=True)
                 raise
             compressor_code = compressor.wait()
         if compressor_code:
             partial_fasta.unlink(missing_ok=True)
+            partial_extracted.unlink(missing_ok=True)
+            partial_missing.unlink(missing_ok=True)
             raise RuntimeError(
                 f"ClusteredNR FASTA compression failed; see {log_path}"
             )
-        subprocess.run(["bgzip", "-t", str(partial_fasta)], check=True)
+        try:
+            subprocess.run(["bgzip", "-t", str(partial_fasta)], check=True)
+        except subprocess.CalledProcessError:
+            partial_fasta.unlink(missing_ok=True)
+            partial_extracted.unlink(missing_ok=True)
+            partial_missing.unlink(missing_ok=True)
+            raise
         partial_fasta.replace(final_fasta)
+        partial_extracted.replace(extracted_representatives)
+        partial_missing.replace(missing_representatives)
+        logger.info(
+            f"Extracted {extracted_count:,} ClusteredNR representative sequences"
+        )
         shutil.rmtree(chunk_dir)
     else:
         logger.info("Reusing extracted ClusteredNR representative FASTA")
@@ -2830,10 +3044,27 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
     )
     taxonomy_inputs = (
         representative_mapping,
+        extracted_representatives,
         source_taxdump / "nodes.dmp",
         source_taxdump / "names.dmp",
     )
-    if force or not outputs_are_current(assignment_outputs, taxonomy_inputs):
+    audit_columns = set()
+    if audit_path.is_file():
+        try:
+            audit_columns = set(
+                pl.read_csv(audit_path, separator="\t", n_rows=0).columns
+            )
+        except Exception:
+            audit_columns = set()
+    if (
+        force
+        or not {
+            "assignment_scope",
+            "refseq_viral_member_taxids",
+            "refseq_mapped_ictv_taxids",
+        }.issubset(audit_columns)
+        or not outputs_are_current(assignment_outputs, taxonomy_inputs)
+    ):
         taxid_remap = renumber_taxdump(
             source_taxdump,
             taxonomy_dir,
@@ -2850,37 +3081,91 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
                 separator="\t",
                 schema_overrides={
                     "representative_accession": pl.String,
+                    "member_accession": pl.String,
+                    "member_is_refseq": pl.Boolean,
                     "ncbi_taxid": pl.String,
                     "ictv_taxid": pl.String,
                 },
+            )
+            .join(
+                pl.read_csv(
+                    extracted_representatives,
+                    separator="\t",
+                    schema_overrides={
+                        "representative_accession": pl.String,
+                        "fasta_accession": pl.String,
+                    },
+                ),
+                on="representative_accession",
+                how="inner",
             )
             .with_columns(
                 pl.when(pl.col("ictv_taxid") == "")
                 .then(None)
                 .otherwise(pl.col("ictv_taxid"))
-                .alias("ictv_taxid")
+                .alias("ictv_taxid"),
+                pl.col("member_is_refseq")
+                .cast(pl.Boolean)
+                .fill_null(False)
+                .alias("member_is_refseq"),
             )
-            .group_by("representative_accession")
+            .with_columns(
+                pl.when(pl.col("member_is_refseq"))
+                .then(pl.col("ncbi_taxid"))
+                .otherwise(None)
+                .alias("refseq_ncbi_taxid"),
+                pl.when(pl.col("member_is_refseq"))
+                .then(pl.col("ictv_taxid"))
+                .otherwise(None)
+                .alias("refseq_ictv_taxid"),
+            )
+            .group_by("fasta_accession")
             .agg(
+                pl.col("representative_accession")
+                .unique()
+                .alias("representative_accessions"),
                 pl.col("ncbi_taxid").unique().alias("ncbi_taxids"),
+                pl.col("refseq_ncbi_taxid")
+                .drop_nulls()
+                .unique()
+                .alias("refseq_ncbi_taxids"),
                 pl.col("ictv_taxid").drop_nulls().unique().alias("ictv_taxids"),
+                pl.col("refseq_ictv_taxid")
+                .drop_nulls()
+                .unique()
+                .alias("refseq_ictv_taxids"),
+                pl.len().alias("viral_member_count"),
+                pl.col("member_is_refseq").sum().alias("refseq_viral_member_count"),
+                pl.col("ictv_taxid").is_not_null().sum().alias("mapped_member_count"),
+                (
+                    pl.col("member_is_refseq")
+                    & pl.col("ictv_taxid").is_not_null()
+                )
+                .sum()
+                .alias("refseq_mapped_member_count"),
                 pl.col("ictv_taxid").null_count().alias("unmapped_member_count"),
             )
-            .sort("representative_accession")
+            .sort("fasta_accession")
         )
         partials = {
             path: path.with_suffix(path.suffix + ".partial")
-            for path in (assignments_path, mmseqs_mapping, diamond_mapping, audit_path)
+            for path in (
+                assignments_path,
+                mmseqs_mapping,
+                diamond_mapping,
+                audit_path,
+            )
         }
         taxon_cache = {}
 
         def taxon_for(taxid: str):
-            dense_taxid = int(taxid)
+            dense_taxid = str(taxid)
             if dense_taxid not in taxon_cache:
                 taxon_cache[dense_taxid] = taxopy.Taxon(dense_taxid, taxdb)
             return taxon_cache[dense_taxid]
 
         missing = 0
+        refseq_assigned = 0
         genus_rank_index = ICTV_RANKS.index("genus")
         with (
             partials[assignments_path].open("w", encoding="utf-8") as assignments,
@@ -2894,22 +3179,66 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
             )
             diamond.write("accession\taccession.version\ttaxid\tgi\n")
             audit.write(
-                "representative_accession\tncbi_viral_member_taxids\t"
-                "mapped_ictv_taxids\tassigned_ictv_taxid\t"
-                "unmapped_member_count\tassignment_method\n"
+                "representative_accession\tfasta_accession\t"
+                "ncbi_viral_member_taxids\t"
+                "refseq_viral_member_taxids\t"
+                "mapped_ictv_taxids\trefseq_mapped_ictv_taxids\t"
+                "selected_ictv_taxids\tassigned_ictv_taxid\t"
+                "viral_member_count\trefseq_viral_member_count\t"
+                "mapped_member_count\trefseq_mapped_member_count\t"
+                "unmapped_member_count\tassignment_scope\tassignment_method\n"
             )
             for (
-                representative,
+                fasta_accession,
+                representative_accessions,
                 ncbi_taxids,
+                refseq_ncbi_taxids,
                 ictv_taxids,
+                refseq_ictv_taxids,
+                viral_member_count,
+                refseq_viral_member_count,
+                mapped_member_count,
+                refseq_mapped_member_count,
                 unmapped,
             ) in grouped.iter_rows():
-                represented_taxids = list(
-                    dict.fromkeys(
+                representative_accessions = sorted(
+                    str(accession)
+                    for accession in representative_accessions
+                    if accession is not None and str(accession)
+                )
+                ncbi_taxids = sorted(
+                    str(taxid)
+                    for taxid in ncbi_taxids
+                    if taxid is not None and str(taxid)
+                )
+                refseq_ncbi_taxids = sorted(
+                    str(taxid)
+                    for taxid in refseq_ncbi_taxids
+                    if taxid is not None and str(taxid)
+                )
+                ictv_taxids = sorted(
+                    str(taxid)
+                    for taxid in ictv_taxids
+                    if taxid is not None and str(taxid)
+                )
+                refseq_ictv_taxids = sorted(
+                    str(taxid)
+                    for taxid in refseq_ictv_taxids
+                    if taxid is not None and str(taxid)
+                )
+                if refseq_ncbi_taxids:
+                    source_taxids = refseq_ictv_taxids
+                    assignment_scope = "refseq_viral_members"
+                else:
+                    source_taxids = ictv_taxids
+                    assignment_scope = "all_viral_members"
+                represented_taxids = sorted(
+                    {
                         taxid_remap.get(str(taxid), str(taxid))
-                        for taxid in ictv_taxids
+                        for taxid in source_taxids
                         if taxid is not None and str(taxid)
-                    )
+                    },
+                    key=int,
                 )
                 if not represented_taxids:
                     missing += 1
@@ -2917,15 +3246,28 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
                         continue
                     assigned = taxon_for("1")
                     method = "unresolved_root"
+                    assignment_scope = "unresolved"
                 elif len(represented_taxids) == 1:
                     assigned = taxon_for(represented_taxids[0])
-                    method = "direct"
+                    method = (
+                        "refseq_direct"
+                        if assignment_scope == "refseq_viral_members"
+                        else "direct"
+                    )
+                    if assignment_scope == "refseq_viral_members":
+                        refseq_assigned += 1
                 else:
                     assigned = taxopy.find_lca(
                         [taxon_for(taxid) for taxid in represented_taxids],
                         taxdb,
                     )
-                    method = "lca"
+                    method = (
+                        "refseq_lca"
+                        if assignment_scope == "refseq_viral_members"
+                        else "lca"
+                    )
+                    if assignment_scope == "refseq_viral_members":
+                        refseq_assigned += 1
                 rank_index = (
                     ICTV_RANKS.index(assigned.rank)
                     if assigned.rank in ICTV_RANKS
@@ -2938,18 +3280,24 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
                             method += "_genus_cap"
                             break
                 assignments.write(
-                    f"{representative}\t{representative}\t{assigned.taxid}\t"
+                    f"{fasta_accession}\t{fasta_accession}\t{assigned.taxid}\t"
                     f"{assigned.name}\t{';'.join(represented_taxids)}\t"
                     f"{len(represented_taxids)}\t{method}\n"
                 )
-                mmseqs.write(f"{representative}\t{assigned.taxid}\n")
+                mmseqs.write(f"{fasta_accession}\t{assigned.taxid}\n")
                 diamond.write(
-                    f"{representative}\t{representative}\t{assigned.taxid}\t\n"
+                    f"{fasta_accession}\t{fasta_accession}\t{assigned.taxid}\t\n"
                 )
                 audit.write(
-                    f"{representative}\t{';'.join(ncbi_taxids)}\t"
+                    f"{';'.join(representative_accessions)}\t{fasta_accession}\t"
+                    f"{';'.join(ncbi_taxids)}\t"
+                    f"{';'.join(refseq_ncbi_taxids)}\t"
+                    f"{';'.join(ictv_taxids)}\t"
+                    f"{';'.join(refseq_ictv_taxids)}\t"
                     f"{';'.join(represented_taxids)}\t{assigned.taxid}\t"
-                    f"{unmapped}\t{method}\n"
+                    f"{viral_member_count}\t{refseq_viral_member_count}\t"
+                    f"{mapped_member_count}\t{refseq_mapped_member_count}\t"
+                    f"{unmapped}\t{assignment_scope}\t{method}\n"
                 )
         if missing and not allow_missing_taxonomy:
             for partial in partials.values():
@@ -2960,8 +3308,13 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
             )
         for final_path, partial_path in partials.items():
             partial_path.replace(final_path)
+        assigned_count = (
+            grouped.height if allow_missing_taxonomy else grouped.height - missing
+        )
         logger.info(
-            f"Assigned taxonomy for {grouped.height - missing:,} representatives"
+            f"Assigned taxonomy for {assigned_count:,} representatives "
+            f"({refseq_assigned:,} using RefSeq viral member mappings; "
+            f"{missing:,} unresolved)"
         )
     else:
         logger.info("Reusing completed primary-sequence taxonomy assignments")
@@ -3057,6 +3410,8 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
                 "representative_viral_taxids": str(representative_viral_taxids),
                 "representative_taxonomy": str(representative_mapping),
                 "representatives": str(representatives),
+                "extracted_representatives": str(extracted_representatives),
+                "missing_representatives": str(missing_representatives),
                 "ncbi_taxid_to_ictv": str(ncbi_taxid_to_ictv),
                 "source_taxdump": str(source_taxdump),
                 "taxonomy": str(taxonomy_dir),

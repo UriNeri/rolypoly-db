@@ -1,6 +1,7 @@
 .pixi/
 .pytest_cache/
 .ruff_cache/
+.work/
 __pycache__/
 *.py[cod]
 *.log
