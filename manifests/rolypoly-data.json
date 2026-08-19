@@ -6,9 +6,66 @@
     "ncbi_virus_diamond_taxdb": "reference_seqs/ncbi_virus/diamond/ncbi_virus.dmnd",
     "ncbi_virus_taxonomy": "reference_seqs/ncbi_virus/taxonomy",
     "refseq_ribovirus_mmseqs": "reference_seqs/ncbi_virus/mmseqs/refseq_ribovirus_genomes_cleaned",
-    "refseq_ribovirus_fasta": "reference_seqs/ncbi_virus/refseq_ribovirus_genomes.fasta",
+    "refseq_non_riboviria_mmseqs": "reference_seqs/ncbi_virus/mmseqs/refseq_non_riboviria_genomes",
+    "refseq_ribovirus_cleaned_fasta": "reference_seqs/ncbi_virus/refseq_ribovirus_genomes_cleaned.fasta.gz",
+    "refseq_ribovirus_cleaned_orfs": "reference_seqs/ncbi_virus/refseq_ribovirus_genomes_orfs_cleaned.faa.gz",
+    "rvmt_mmseqs": "reference_seqs/RVMT/mmseqs/RVMT_cleaned",
+    "rvmt_cleaned_orfs": "reference_seqs/RVMT/RVMT_cleaned_orfs.faa.gz",
+    "masking_nucleotide": "contam/masking/combined_entropy_masked.fasta.gz",
+    "masking_protein": "contam/masking/combined_deduplicated_orfs.faa.gz",
     "rrna_genome_mapping": "contam/rrna/rrna_to_genome_mapping.parquet",
+    "rfam_pressed_cm": "profiles/cm/Rfam.cm",
     "profile_hmms": "profiles/hmmdbs",
     "profile_mmseqs": "profiles/mmseqs_dbs"
+  },
+  "bundle": {
+    "include": [
+      "README.md",
+      "contam/adapters/**/*",
+      "contam/masking/combined_deduplicated_orfs.faa.gz",
+      "contam/masking/combined_entropy_masked.fasta.gz",
+      "contam/rrna/**/*",
+      "profiles/*.csv.gz",
+      "profiles/*.json",
+      "profiles/*.tsv.gz",
+      "profiles/cm/Rfam.cm.i1*",
+      "profiles/hmmdbs/*.hmm",
+      "profiles/mmseqs_dbs/**/*",
+      "reference_seqs/RVMT/RVMT_cleaned_orfs.faa.gz",
+      "reference_seqs/RVMT/mmseqs/**/*",
+      "reference_seqs/ncbi_virus/*.build.json",
+      "reference_seqs/ncbi_virus/diamond/**/*",
+      "reference_seqs/ncbi_virus/mmseqs/**/*",
+      "reference_seqs/ncbi_virus/refseq_ribovirus_genomes_cleaned.fasta.gz",
+      "reference_seqs/ncbi_virus/refseq_ribovirus_genomes_orfs_cleaned.faa.gz",
+      "reference_seqs/ncbi_virus/taxonomy/**/*",
+      "reference_seqs/uniref/*.gz",
+      "rrna/RF*.cm",
+      "rrna/*_rrna.tab",
+      "rrna/rrna.cm*"
+    ],
+    "include_small": {
+      "max_bytes": 20971520,
+      "patterns": [
+        "**/*.build.json",
+        "**/*.log",
+        "**/*.json"
+      ]
+    },
+    "exclude": [
+      "**/*.aria2",
+      "**/*.partial",
+      "**/*.pid",
+      "**/*.tmp",
+      "**/__pycache__/**",
+      "**/tmp*",
+      "profiles/genomad/**",
+      "reference_seqs/mito_refseq/**",
+      "reference_seqs/ncbi_virus/refseq_non_riboviria_genomes.fasta",
+      "reference_seqs/ncbi_virus/refseq_ribovirus_genomes.fasta",
+      "reference_seqs/ncbi_virus/refseq_ribovirus_genomes_orfs.faa",
+      "reference_seqs/plastid_refseq/**",
+      "rrna/tmptmtp.fasta"
+    ]
   }
 }

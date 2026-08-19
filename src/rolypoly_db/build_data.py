@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import polars as pl
+import pyhmmer
 import requests
 from bbmapy import bbduk, bbmask, kcompress
 from click import Choice
@@ -36,7 +37,7 @@ from rolypoly.utils.logging.loggit import setup_logging
 from rolypoly.utils.various import (
     extract_tar,
     fetch_and_extract,
-    read_fwf,
+    read_cmscan_tblout,
     run_command_comp,
     simple_fetch,
 )
@@ -71,6 +72,7 @@ BUILD_STEPS = (
     "vfam",
     "rvmt-motifs",
     "uniref50-virus",
+    "masking",
     "contamination",
     "plastid",
     "trna",
@@ -201,7 +203,7 @@ def build_data(
     ``--step`` to rebuild one or more selected data families.
 
     1. Build geNomad RNA viral HMMs
-    2. Build protein HMMs RdRp-scan, RVMT, Neordrp_v2.1, tsa_2018 and Pfam 38
+    2. Build protein HMMs RdRp-scan, RVMT, Neordrp_v2.1, and Pfam A
     3. Download and prepare rRNA databases SILVA_138.1_SSURef_NR99_tax_silva.fasta and SILVA_138.1_LSURef_NR99_tax_silva.fasta
     4. Download Rfam data.
     5. Download and prepare NCBI ribovirus nucleotide sequences and taxonomy.
@@ -280,7 +282,7 @@ def build_data(
         prepare_neordrp_profiles(data_dir, threads, logger)
 
     if "ncbi-virus-nucleotide" in selected_steps:
-        prepare_ncbi_ribovirus(data_dir, threads, logger)
+        prepare_ncbi_virus_nucleotide_databases(data_dir, threads, logger)
 
     if "ncbi-virus-taxdb" in selected_steps:
         prepare_ncbi_virus_taxdb(
@@ -309,6 +311,9 @@ def build_data(
 
     if "uniref50-virus" in selected_steps:
         prepare_uniref50_viral(data_dir, threads, logger)
+
+    if "masking" in selected_steps:
+        prepare_masking_seqs(data_dir, threads, logger)
 
     if "contamination" in selected_steps:
         prepare_contamination_seqs(data_dir, threads, logger)
@@ -401,25 +406,31 @@ def prepare_rvmt_mmseqs(data_dir, threads, logger: logging.Logger):
 
     ### run cmscan with rrnas to remove more potential chimeras
     logger.info("Running cmscan to identify rRNA sequences in RVMT contigs")
+    rrna_dir = Path(data_dir) / "rrna"
+    rrna_cm = rrna_dir / "rrna.cm"
+    rrna_tblout = rrna_dir / "rvmt_rrna.tab"
+    if not rrna_cm.is_file():
+        raise FileNotFoundError(
+            f"The curated rRNA covariance-model database is missing: {rrna_cm}"
+        )
     run_command_comp(
         base_cmd="cmscan",
         positional_args_location="end",
         positional_args=[
-            os.path.join(data_dir, "profiles", "cm", "rrna", "rrna.cm"),
+            str(rrna_cm),
             contigs_fasta_path,
         ],
         params={
-            "cpu": 8,
-            "tblout": "rvmt_rrna.tab",
+            "cpu": threads,
+            "tblout": str(rrna_tblout),
             "cut_ga": True,
             "noali": True,
+            "o": os.devnull,
         },
         logger=logger,
     )
-    rrna_df = read_fwf(
-        "rvmt_rrna.tab"
-    )  # ,widths=widths, columns=column_names,dtypes = "str")
-    rrna_df = rrna_df.filter(pl.col("E-value").cast(pl.Float64) < 1e-3)
+    rrna_df = read_cmscan_tblout(rrna_tblout)
+    rrna_df = rrna_df.filter(pl.col("e_value") < 1e-3)
     chimera_rrna_ids = rrna_df.select(pl.col("query_name")).to_series().to_list()
     chimera_ids.extend(chimera_rrna_ids)
     logger.info("Filtering out known chimeric and potential rRNA containing sequences")
@@ -512,9 +523,8 @@ def download_and_extract_rfam(data_dir, logger):
     """
 
     rfam_url = "https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.cm.gz"
-    rfam_cm_path = data_dir + "/Rfam.cm.gz"
-    rfam_extract_path = data_dir + "/profiles/cm/"
-    # subprocess.run("cmpress Rfam.cm", shell=True)
+    rfam_extract_path = Path(data_dir) / "profiles" / "cm"
+    rfam_cm_path = rfam_extract_path / "Rfam.cm"
 
     logger.info("Downloading Rfam database")
     try:
@@ -524,12 +534,41 @@ def download_and_extract_rfam(data_dir, logger):
         logger.error(f"Error downloading Rfam database: {e}")
 
     # press the cm file
-    run_command_comp(
+    cmpress_success = run_command_comp(
         base_cmd="cmpress",
         positional_args_location="start",
-        positional_args=[os.path.join(rfam_extract_path, "Rfam.cm")],
+        positional_args=[str(rfam_cm_path)],
+        params={"F": True},
         logger=logger,
     )
+
+    pressed_suffixes = ("i1f", "i1i", "i1m", "i1p")
+    pressed_paths = [
+        Path(f"{rfam_cm_path}.{suffix}") for suffix in pressed_suffixes
+    ]
+    pressed_files_complete = all(
+        path.is_file() and path.stat().st_size > 0 for path in pressed_paths
+    )
+    pressed_files_current = (
+        cmpress_success
+        and rfam_cm_path.is_file()
+        and pressed_files_complete
+        and all(
+            path.stat().st_mtime >= rfam_cm_path.stat().st_mtime
+            for path in pressed_paths
+        )
+    )
+    if pressed_files_current:
+        rfam_cm_path.unlink()
+        logger.info(
+            "Removed raw Rfam.cm after verifying all four current, nonempty "
+            "cmpress database files"
+        )
+    elif rfam_cm_path.is_file():
+        logger.warning(
+            "Retaining raw Rfam.cm because the four pressed database files are "
+            "missing, empty, or older than the raw covariance-model database"
+        )
 
 
 def prepare_vfam(data_dir, logger: logging.Logger):
@@ -537,6 +576,7 @@ def prepare_vfam(data_dir, logger: logging.Logger):
     vfam_url = "https://fileshare.lisc.univie.ac.at/vog/latest"
     metadata_path = os.path.join(data_dir, "profiles", "vfam.annotations.tsv.gz")
     work_dir = os.path.join(hmmdb_dir, "vfam")
+    raw_metadata_path = os.path.join(work_dir, "vfam.annotations.tsv.gz")
     archive_path = os.path.join(work_dir, "vfam.raw_algs.tar.gz")
     msa_dir = os.path.join(work_dir, "msa")
     os.makedirs(work_dir, exist_ok=True)
@@ -544,7 +584,7 @@ def prepare_vfam(data_dir, logger: logging.Logger):
     logger.info("Downloading VFam annotations and alignments")
     fetch_and_extract(
         url=f"{vfam_url}/vfam.annotations.tsv.gz",
-        fetched_to=metadata_path,
+        fetched_to=raw_metadata_path,
         extract=False,
         logger=logger,
     )
@@ -556,13 +596,13 @@ def prepare_vfam(data_dir, logger: logging.Logger):
     )
     extract_tar(Path(archive_path), Path(work_dir), logger)
 
-    vfam_df = pl.read_csv(metadata_path, separator="\t")
+    vfam_df = pl.read_csv(raw_metadata_path, separator="\t")
     valid_accessions = set(
         vfam_df.filter(
             ~pl.col("ConsensusFunctionalDescription")
             .str.to_lowercase()
             .str.contains("hypothetical")
-            & (pl.col("SpeciesCount") > 2)
+            & (pl.col("SpeciesCount") >= 2)
         )["#GroupName"].to_list()
     )
     removed = 0
@@ -571,10 +611,58 @@ def prepare_vfam(data_dir, logger: logging.Logger):
             msa_path.unlink()
             removed += 1
     logger.info(
-        f"Retained {len(valid_accessions):,} informative VFam accessions; "
+        f"Retained {len(valid_accessions):,} metadata-eligible VFam accessions; "
         f"removed {removed:,} alignments"
     )
 
+    alignment_stats = []
+    kept_msa_paths = set()
+    diversity_removed = 0
+    for msa_path in sorted(Path(msa_dir).glob("*.msa")):
+        with pyhmmer.easel.MSAFile(msa_path, digital=True) as msa_file:
+            msa = msa_file.read()
+        sequence_count = len(msa.sequences)
+        nonredundant_msa = msa.identity_filter(
+            max_identity=1.0,
+            preference="conscover",
+            sample=False,
+        )
+        nonredundant_sequence_count = len(nonredundant_msa.sequences)
+        alignment_stats.append(
+            {
+                "#GroupName": msa_path.stem,
+                "MSASequenceCount": sequence_count,
+                "MSANonredundantSequenceCount": nonredundant_sequence_count,
+            }
+        )
+        if nonredundant_sequence_count >= 2:
+            kept_msa_paths.add(msa_path)
+        else:
+            msa_path.unlink()
+            diversity_removed += 1
+
+    stats_schema = {
+        "#GroupName": pl.String,
+        "MSASequenceCount": pl.Int64,
+        "MSANonredundantSequenceCount": pl.Int64,
+    }
+    stats_df = (
+        pl.DataFrame(alignment_stats, schema_overrides=stats_schema)
+        if alignment_stats
+        else pl.DataFrame(schema=stats_schema)
+    )
+    vfam_df = vfam_df.join(stats_df, on="#GroupName", how="left")
+    # Keep the existing RolyPoly metadata contract: this historical `.tsv.gz`
+    # path contains comma-delimited CSV consumed by the shared profile builders.
+    # The MSA count columns are build-audit metadata and are deliberately not
+    # exposed by annotate_prot.INFO_TABLE_SPECS.
+    vfam_df.write_csv(metadata_path, compression="gzip")
+
+    logger.info(
+        f"Retained {len(kept_msa_paths):,} VFam alignments with at least two "
+        f"representatives after 100%-identity filtering; removed "
+        f"{diversity_removed:,} redundant alignments"
+    )
     hmmdb_from_directory(
         msa_dir=msa_dir,
         output=os.path.join(hmmdb_dir, "vfam.hmm"),
@@ -944,27 +1032,28 @@ def prepare_pfam_rdrps_rt(data_dir, threads, logger: logging.Logger):
     pfam_hmm_url = (
         "https://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam38.2/Pfam-A.hmm.gz"
     )
-    pfam_msa_url = (
-        "https://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam38.2/Pfam-A.fasta.gz"
+    pfam_seed_url = (
+        "https://ftp.ebi.ac.uk/pub/databases/Pfam/releases/Pfam38.2/Pfam-A.seed.gz"
     )
     pfam_gz_path = os.path.join(hmmdb_dir, "Pfam-A.hmm.gz")
+    pfam_seed_path = os.path.join(hmmdb_dir, "Pfam-A.seed.gz")
     os.makedirs(hmmdb_dir, exist_ok=True)
     fetch_and_extract(url=pfam_hmm_url, fetched_to=pfam_gz_path, extract_to=hmmdb_dir)
 
     RdRps_and_RTs = [
-        "PF04197.17",
-        "PF04196.17",
-        "PF22212.1",
-        "PF22152.1",
-        "PF22260.1",
-        "PF00680.25",
-        "PF00978.26",
-        "PF00998.28",
-        "PF02123.21",
-        "PF07925.16",
-        "PF00078.32",
-        "PF07727.19",
-        "PF13456.11",
+        "PF04197.18",  # Birnavirus RNA dependent RNA polymerase (VP1), palm domain
+        "PF04196.18",  # Bunyavirus RNA dependent RNA polymerase
+        "PF22212.2",  # CPV, RNA-directed RNA polymerase, central polymerase domain
+        "PF22152.2",  # Permutotetravirus RNA-dependent RNA polymerase palm domain
+        "PF22260.2",  # Permutotetravirus RNA-dependent RNA polymerase thumb domain
+        "PF00680.26",  # Viral RNA-dependent RNA polymerase
+        "PF00978.27",  # RNA dependent RNA polymerase
+        "PF00998.29",  # Viral RNA-directed RNA-polymerase
+        "PF02123.22",  # Viral RNA-directed RNA-polymerase
+        "PF07925.16",  # Reovirus RNA-dependent RNA polymerase lambda 3
+        "PF00078.33",  # Reverse transcriptase
+        "PF07727.20",  # Reverse transcriptase
+        "PF13456.13",  # Reverse transcriptase-like
     ]
 
     # Use hmmfetch to extract the small set of Pfam HMMs we care about
@@ -979,11 +1068,57 @@ def prepare_pfam_rdrps_rt(data_dir, threads, logger: logging.Logger):
         logger=logger,
     )
 
-    # also prepare mmseqs profile db
-    subprocess.run(
-        "mmseqs databases Pfam-A.seed data/profiles/mmseqs_dbs/pfam_a/pfam_a_38_seed tmp",
-        shell=True,
-        check=True,
+    # MMseqs2's built-in Pfam downloader still uses EBI's retired FTP endpoint.
+    # Download the pinned seed over HTTPS and reproduce its convertmsa/msa2profile
+    # recipe while retaining the database path consumed by RolyPoly.
+    fetch_and_extract(
+        url=pfam_seed_url,
+        fetched_to=pfam_seed_path,
+        extract=False,
+        logger=logger,
+    )
+    pfam_mmseqs_work = Path(hmmdb_dir) / "pfam_mmseqs_work"
+    pfam_mmseqs_work.mkdir(parents=True, exist_ok=True)
+    pfam_seed_msa = pfam_mmseqs_work / "pfam_seed_msa"
+    pfam_seed_db = Path(mmseqs_dbs) / "pfam_a" / "pfam_a_38_seed"
+    pfam_seed_db.parent.mkdir(parents=True, exist_ok=True)
+    if pfam_seed_msa.with_suffix(".dbtype").exists():
+        if not run_command_comp(
+            base_cmd="mmseqs rmdb",
+            positional_args=[str(pfam_seed_msa)],
+            positional_args_location="start",
+            check_output=False,
+            logger=logger,
+        ):
+            raise RuntimeError("Could not reset the temporary Pfam MSA database")
+    if not run_command_comp(
+        base_cmd="mmseqs convertmsa",
+        positional_args=[pfam_seed_path, str(pfam_seed_msa)],
+        positional_args_location="start",
+        check_output=False,
+        logger=logger,
+    ):
+        raise RuntimeError("MMseqs2 convertmsa failed for the Pfam seed")
+    if pfam_seed_db.with_suffix(".dbtype").exists():
+        if not run_command_comp(
+            base_cmd="mmseqs rmdb",
+            positional_args=[str(pfam_seed_db)],
+            positional_args_location="start",
+            check_output=False,
+            logger=logger,
+        ):
+            raise RuntimeError("Could not remove the previous Pfam MMseqs2 database")
+    if not run_command_comp(
+        base_cmd="mmseqs msa2profile",
+        positional_args=[str(pfam_seed_msa), str(pfam_seed_db)],
+        positional_args_location="start",
+        params={"match-mode": 1, "match-ratio": 0.5, "threads": threads},
+        output_file=str(pfam_seed_db.with_suffix(".dbtype")),
+        logger=logger,
+    ):
+        raise RuntimeError("MMseqs2 msa2profile failed for the Pfam seed")
+    Path(str(pfam_seed_db) + ".version").write_text(
+        "Pfam 38.2\n", encoding="utf-8"
     )
     # TODO: Filter the pfam_A mmseqs db to remove "hypothetical protein" + similar entries?
 
@@ -1006,7 +1141,8 @@ def prepare_pfam_rdrps_rt(data_dir, threads, logger: logging.Logger):
     # clean up downloaded gz
     try:
         os.remove(pfam_gz_path)
-        os.remove("tmp")
+        os.remove(pfam_seed_path)
+        shutil.rmtree(pfam_mmseqs_work)
 
     except Exception:
         pass
@@ -1123,141 +1259,333 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
     logger.info("Finished preparing RVMT databases")
 
 
-def prepare_ncbi_ribovirus(data_dir, threads, logger: logging.Logger):
-    """Download and prepare NCBI ribovirus reference sequences (RefSeq only).
+def _fetch_edirect_fasta(query, output_path, logger):
+    """Fetch one Entrez nucleotide query to FASTA without a shell pipeline."""
+    import re
 
-    Downloads complete RefSeq genomes for RNA viruses (Riboviria), processes them
-    with entropy masking and compression for efficient searches.
-
-    Args:
-        data_dir (str): Base directory for data storage
-        threads (int): Number of CPU threads to use
-        logger: Logger object for recording progress and errors
-    """
-
-    logger.info("Preparing NCBI ribovirus reference sequences")
-
-    ncbi_virus_dir = os.path.join(data_dir, "reference_seqs", "ncbi_virus")
-    os.makedirs(ncbi_virus_dir, exist_ok=True)
-    mmdb_dir = os.path.join(ncbi_virus_dir, "mmseqs")
-    os.makedirs(mmdb_dir, exist_ok=True)
-
-    # Define file paths
-    raw_fasta_path = os.path.join(ncbi_virus_dir, "refseq_ribovirus_genomes.fasta")
-    entropy_masked_path = os.path.join(
-        ncbi_virus_dir, "refseq_ribovirus_genomes_entropy_masked.fasta"
-    )  # noqa (F841)
-    compressed_path = os.path.join(
-        ncbi_virus_dir, "refseq_ribovirus_genomes_flat.fasta"
-    )  # noqa (F841)
-
-    # Riboviria taxid
-    taxid = "2559587"
-
-    # Use esearch and efetch to download complete RefSeq ribovirus genomes
-    logger.info(f"Downloading RefSeq ribovirus genomes for taxid {taxid}")
-
-    # if from_ena == True:
-    #     # Use EBI/ENA REST API instead of NCBI E-utilities
-    #     logger.info("Searching EBI/ENA for Riboviria sequences")
-
-    #     # EBI/ENA API search for Riboviria complete genomes
-    #     import requests
-
-    #     # Search for Riboviria sequences in ENA
-    #     search_url = "https://www.ebi.ac.uk/ena/portal/api/search"
-    #     search_params = {
-    #         "result": "sequence",
-    #         "query": f'tax_tree({taxid}) AND mol_type="genomic RNA" AND base_count>1000',
-    #         "fields": "accession,scientific_name,description,mol_type,tax_id,tax_lineage",
-    #         "format": "json",
-    #         "limit": "100"  # Get all results
-    #     }
-
-    #     logger.info("Querying EBI/ENA for sequence metadata")
-    #     response = requests.get(search_url, params=search_params)
-    #     response.raise_for_status()
-
-    #     sequences_metadata = response.json()
-    #     logger.info(f"Found {len(sequences_metadata)} Riboviria sequences")
-
-    #     # Get FASTA sequences using EBI API
-    #     logger.info("Downloading sequences from EBI/ENA")
-    #     accessions = [seq["accession"] for seq in sequences_metadata[:1000]]  # Limit to avoid overwhelming
-
-    #     with open(raw_fasta_path, "w") as fasta_out:
-    #         for i, accession in enumerate(accessions):
-    #             if i % 50 == 0:
-    #                 logger.info(f"Downloaded {i}/{len(accessions)} sequences")
-
-    #             # Get FASTA from EBI
-    #             fasta_url = f"https://www.ebi.ac.uk/ena/browser/api/fasta/{accession}"
-    #             fasta_response = requests.get(fasta_url)
-
-    #             if fasta_response.status_code == 200:
-    #                 fasta_out.write(fasta_response.text)
-    #                 fasta_out.write("\n")
-    #             else:
-    #                 logger.warning(f"Failed to download {accession}: {fasta_response.status_code}")
-
-    #     logger.info("Downloaded RefSeq ribovirus genomes from EBI/ENA")
-
-    #     # Apply entropy masking first (consistent with RVMT approach)
-    #     logger.info("Applying entropy masking")
-
-    # if from_edirect == True:
-    # esearch_query = f"txid{taxid}[Organism:exp] AND srcdb_refseq[PROP] AND complete genome[title]"
-    #     logger.info("Running esearch | efetch pipeline")
-    #     pipeline_cmd = f"~/bin/edirect/esearch -db nuccore -query '{esearch_query}' | ~/bin/edirect/efetch -format fasta > {raw_fasta_path}"
-
-    #     run_command_comp(
-    #         base_cmd=pipeline_cmd,
-    #         params={},
-    #         output_file=raw_fasta_path,
-    #         logger=logger,
-    #         check_output=True
-    #     )
-
-    from_ncbi_ftp = True  # for now, above methods is 1. edirect dependent, 2. ENA API dependent which seems slow/limited (or I'm not filtering prorperly - very likely)
-    if from_ncbi_ftp == True:
-        # genomes
-        fetch_and_extract(
-            url="https://ftp.ncbi.nlm.nih.gov/refseq/release/viral/viral.1.1.genomic.fna.gz",
-            fetched_to=os.path.join(ncbi_virus_dir, "viral.1.1.genomic.fna.gz"),
-            extract_to=ncbi_virus_dir,
-            rename_extracted=raw_fasta_path,
-        )
-        # orfs
-        fetch_and_extract(
-            url="https://ftp.ncbi.nlm.nih.gov/refseq/release/viral/viral.1.protein.faa.gz",
-            fetched_to=os.path.join(ncbi_virus_dir, "viral.1.protein.faa.gz"),
-            extract_to=ncbi_virus_dir,
-            rename_extracted=raw_fasta_path.replace(".fasta", "_orfs.faa"),
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    partial_path = output_path.with_name(f"{output_path.name}.part")
+    esearch = shutil.which("esearch")
+    efetch = shutil.which("efetch")
+    if esearch is None or efetch is None:
+        raise RuntimeError(
+            "Entrez Direct executables 'esearch' and 'efetch' are required"
         )
 
-    logger.info("Downloaded NCBI ribovirus genomes")
+    logger.info("Querying NCBI nuccore: %s", query)
+    try:
+        search = subprocess.run(
+            [esearch, "-db", "nuccore", "-query", query],
+            check=True,
+            capture_output=True,
+        )
+        count_match = re.search(rb"<Count>(\d+)</Count>", search.stdout)
+        expected_records = int(count_match.group(1)) if count_match else None
+        with partial_path.open("wb") as fasta_out:
+            subprocess.run(
+                [efetch, "-format", "fasta"],
+                input=search.stdout,
+                stdout=fasta_out,
+                check=True,
+            )
+        if partial_path.stat().st_size == 0:
+            raise RuntimeError(f"NCBI returned an empty FASTA for query: {query}")
+        fetched_records = _fasta_stats(partial_path)["records"]
+        if expected_records is not None and fetched_records != expected_records:
+            raise RuntimeError(
+                f"NCBI reported {expected_records:,} records, but EFetch produced "
+                f"{fetched_records:,}"
+            )
+        partial_path.replace(output_path)
+    except Exception:
+        partial_path.unlink(missing_ok=True)
+        raise
 
-    # Create MMseqs2 database
-    logger.info("Creating MMseqs2 database")
-    run_command_comp(
-        base_cmd="mmseqs createdb",
-        positional_args_location="start",
-        positional_args=[
-            raw_fasta_path,
-            os.path.join(mmdb_dir, "ncbi_ribovirus_cleaned"),
-        ],
-        params={"dbtype": "2"},
+    return expected_records
+
+
+def _fasta_stats(fasta_path):
+    """Return streaming record and residue counts for a FASTA file."""
+    import gzip
+
+    fasta_path = Path(fasta_path)
+    opener = gzip.open if fasta_path.suffix == ".gz" else open
+    records = 0
+    residues = 0
+    with opener(fasta_path, "rt", encoding="utf-8") as fasta:
+        for line in fasta:
+            if line.startswith(">"):
+                records += 1
+            else:
+                residues += len(line.strip())
+    return {"records": records, "residues": residues}
+
+
+def _fetch_linked_protein_accessions(nucleotide_accessions, logger):
+    """Fetch protein accessions linked to nucleotide accessions through EDirect."""
+    nucleotide_accessions = sorted(set(nucleotide_accessions))
+    if not nucleotide_accessions:
+        return []
+
+    epost = shutil.which("epost")
+    elink = shutil.which("elink")
+    efetch = shutil.which("efetch")
+    if epost is None or elink is None or efetch is None:
+        raise RuntimeError(
+            "Entrez Direct executables 'epost', 'elink', and 'efetch' are required"
+        )
+
+    logger.info(
+        "Fetching linked protein accessions for %s nucleotide records",
+        len(nucleotide_accessions),
+    )
+    posted = subprocess.run(
+        [epost, "-db", "nuccore", "-id", ",".join(nucleotide_accessions)],
+        check=True,
+        capture_output=True,
+    )
+    linked = subprocess.run(
+        [elink, "-target", "protein"],
+        input=posted.stdout,
+        check=True,
+        capture_output=True,
+    )
+    fetched = subprocess.run(
+        [efetch, "-format", "acc"],
+        input=linked.stdout,
+        check=True,
+        capture_output=True,
+    )
+    return [
+        line.strip()
+        for line in fetched.stdout.decode().splitlines()
+        if line.strip()
+    ]
+
+
+def _create_mmseqs_nucleotide_db(fasta_path, output_prefix, logger):
+    """Build an MMseqs2 nucleotide DB before replacing an existing DB."""
+    output_prefix = Path(output_prefix)
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    build_dir = output_prefix.parent / f".{output_prefix.name}.build"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    build_dir.mkdir()
+    build_prefix = build_dir / output_prefix.name
+
+    try:
+        success = run_command_comp(
+            base_cmd="mmseqs createdb",
+            positional_args_location="start",
+            positional_args=[str(fasta_path), str(build_prefix)],
+            params={"dbtype": "2"},
+            check_output=False,
+            logger=logger,
+        )
+        if not success or not Path(f"{build_prefix}.dbtype").is_file():
+            raise RuntimeError(f"MMseqs2 failed to create {output_prefix}")
+
+        for old_path in output_prefix.parent.glob(f"{output_prefix.name}*"):
+            if old_path.is_dir():
+                shutil.rmtree(old_path)
+            else:
+                old_path.unlink()
+        for built_path in build_dir.iterdir():
+            shutil.move(str(built_path), output_prefix.parent / built_path.name)
+    finally:
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+
+def _prepare_ncbi_refseq_virus_set(
+    *,
+    data_dir,
+    threads,
+    logger,
+    name,
+    query,
+    filter_rrna,
+    refetch=True,
+):
+    """Fetch and build one taxonomy-defined RefSeq viral nucleotide set."""
+    ncbi_virus_dir = Path(data_dir) / "reference_seqs" / "ncbi_virus"
+    mmdb_dir = ncbi_virus_dir / "mmseqs"
+    ncbi_virus_dir.mkdir(parents=True, exist_ok=True)
+    mmdb_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_fasta_path = ncbi_virus_dir / f"{name}.fasta"
+    if refetch or not raw_fasta_path.is_file():
+        _fetch_edirect_fasta(query, raw_fasta_path, logger)
+    else:
+        logger.info("Reusing existing RefSeq FASTA: %s", raw_fasta_path)
+    raw_stats = _fasta_stats(raw_fasta_path)
+
+    rrna_hits = 0
+    removed_protein_records = 0
+    cleaned_protein_path = None
+    fasta_for_mmseqs = raw_fasta_path
+    if filter_rrna:
+        rrna_dir = Path(data_dir) / "rrna"
+        rrna_cm = rrna_dir / "rrna.cm"
+        rrna_tblout = rrna_dir / "ncbiribo_rrna.tab"
+        if not rrna_cm.is_file():
+            raise FileNotFoundError(
+                f"The curated rRNA covariance-model database is missing: {rrna_cm}"
+            )
+
+        rrna_tblout_current = (
+            rrna_tblout.is_file()
+            and rrna_tblout.stat().st_size > 0
+            and rrna_tblout.stat().st_mtime >= raw_fasta_path.stat().st_mtime
+        )
+        if rrna_tblout_current:
+            logger.info("Reusing existing cmscan tblout: %s", rrna_tblout)
+        else:
+            logger.info("Scanning %s for rRNA contamination", name)
+            success = run_command_comp(
+                base_cmd="cmscan",
+                positional_args_location="end",
+                positional_args=[str(rrna_cm), str(raw_fasta_path)],
+                params={
+                    "cpu": threads,
+                    "tblout": str(rrna_tblout),
+                    "cut_ga": True,
+                    "noali": True,
+                    "o": os.devnull,
+                },
+                check_output=False,
+                logger=logger,
+            )
+            if not success or not rrna_tblout.is_file():
+                raise RuntimeError(f"cmscan failed for {raw_fasta_path}")
+
+        rrna_df = read_cmscan_tblout(rrna_tblout)
+        rrna_ids = rrna_df.get_column("query_name").drop_nulls().unique().to_list()
+        rrna_hits = len(rrna_ids)
+        cleaned_path = ncbi_virus_dir / f"{name}_cleaned.fasta.gz"
+        partial_cleaned_path = cleaned_path.with_name(f"{cleaned_path.name}.part.gz")
+        counts = filter_fasta_by_headers(
+            fasta_file=str(raw_fasta_path),
+            headers=rrna_ids,
+            output_file=str(partial_cleaned_path),
+            invert=True,
+            wrap=True,
+            return_counts=True,
+        )
+        partial_cleaned_path.replace(cleaned_path)
+        logger.info(
+            "Removed %s rRNA-containing records; retained %s of %s",
+            rrna_hits,
+            counts["records_written"],
+            counts["records_processed"],
+        )
+        fasta_for_mmseqs = cleaned_path
+
+        raw_protein_path = raw_fasta_path.with_name(f"{name}_orfs.faa")
+        if raw_protein_path.is_file():
+            rrna_protein_ids = _fetch_linked_protein_accessions(rrna_ids, logger)
+            cleaned_protein_path = raw_fasta_path.with_name(
+                f"{name}_orfs_cleaned.faa.gz"
+            )
+            partial_cleaned_protein_path = cleaned_protein_path.with_name(
+                f"{cleaned_protein_path.name}.part.gz"
+            )
+            protein_counts = filter_fasta_by_headers(
+                fasta_file=str(raw_protein_path),
+                headers=rrna_protein_ids,
+                output_file=str(partial_cleaned_protein_path),
+                invert=True,
+                wrap=True,
+                return_counts=True,
+            )
+            partial_cleaned_protein_path.replace(cleaned_protein_path)
+            removed_protein_records = (
+                protein_counts["records_processed"]
+                - protein_counts["records_written"]
+            )
+            logger.info(
+                "Removed %s protein records linked to rRNA-containing "
+                "Riboviria records",
+                removed_protein_records,
+            )
+
+    final_stats = _fasta_stats(fasta_for_mmseqs)
+    mmseqs_prefix = mmdb_dir / (
+        "refseq_ribovirus_genomes_cleaned"
+        if filter_rrna
+        else "refseq_non_riboviria_genomes"
+    )
+    _create_mmseqs_nucleotide_db(fasta_for_mmseqs, mmseqs_prefix, logger)
+
+    manifest = {
+        "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "source": "NCBI nuccore via Entrez Direct",
+        "query": query,
+        "raw_fasta": raw_fasta_path.name,
+        "raw_records": raw_stats["records"],
+        "raw_residues": raw_stats["residues"],
+        "rrna_filter": "cmscan --cut_ga against rrna/rrna.cm"
+        if filter_rrna
+        else None,
+        "rrna_contaminated_records": rrna_hits,
+        "final_fasta": Path(fasta_for_mmseqs).name,
+        "final_records": final_stats["records"],
+        "final_residues": final_stats["residues"],
+        "cleaned_protein_fasta": cleaned_protein_path.name
+        if cleaned_protein_path
+        else None,
+        "rrna_linked_protein_records_removed": removed_protein_records,
+        "mmseqs_database": str(mmseqs_prefix.relative_to(Path(data_dir))),
+    }
+    manifest_path = ncbi_virus_dir / f"{name}.build.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    logger.info("Prepared %s with %s records", name, final_stats["records"])
+    return manifest
+
+
+def prepare_ncbi_ribovirus(
+    data_dir, threads, logger: logging.Logger, refetch=True
+):
+    """Build the RefSeq Riboviria nucleotide DB and remove rRNA contaminants."""
+    return _prepare_ncbi_refseq_virus_set(
+        data_dir=data_dir,
+        threads=threads,
         logger=logger,
+        name="refseq_ribovirus_genomes",
+        query=(
+            "txid2559587[Organism:exp] AND srcdb_refseq[PROP] "
+            "AND biomol_genomic[PROP]"
+        ),
+        filter_rrna=True,
+        refetch=refetch,
     )
 
-    # Clean up intermediate files
-    try:
-        os.remove(os.path.join(ncbi_virus_dir, "viral.1.1.genomic.fna.gz"))
-        os.remove(os.path.join(ncbi_virus_dir, "viral.1.protein.faa.gz"))
-    except FileNotFoundError:
-        logger.warning("Some intermediate files not found for cleanup")
 
-    logger.info(f"NCBI ribovirus preparation completed in {ncbi_virus_dir}")
+def prepare_ncbi_non_riboviria(
+    data_dir, threads, logger: logging.Logger, refetch=True
+):
+    """Build the RefSeq viral nucleotide DB outside the Riboviria realm."""
+    return _prepare_ncbi_refseq_virus_set(
+        data_dir=data_dir,
+        threads=threads,
+        logger=logger,
+        name="refseq_non_riboviria_genomes",
+        query=(
+            "txid10239[Organism:exp] AND srcdb_refseq[PROP] "
+            "AND biomol_genomic[PROP] NOT txid2559587[Organism:exp]"
+        ),
+        filter_rrna=False,
+        refetch=refetch,
+    )
+
+
+def prepare_ncbi_virus_nucleotide_databases(
+    data_dir, threads, logger: logging.Logger
+):
+    """Build both RefSeq nucleotide databases consumed by virus-mapping."""
+    return {
+        "riboviria": prepare_ncbi_ribovirus(data_dir, threads, logger),
+        "non_riboviria": prepare_ncbi_non_riboviria(data_dir, threads, logger),
+    }
 
 
 def prepare_rvmt_motifs(data_dir, threads, logger):
@@ -1402,6 +1730,127 @@ def prepare_rvmt_motifs(data_dir, threads, logger):
     return True
 
 
+def prepare_masking_seqs(data_dir, threads, logger):
+    """Rebuild viral nucleotide/protein masking sets from cleaned inputs."""
+    logger.info("Preparing masking sequences by combining RVMT and NCBI ribovirus")
+
+    masking_dir = os.path.join(data_dir, "contam", "masking")
+    os.makedirs(masking_dir, exist_ok=True)
+
+    rvmt_fasta_path = os.path.join(
+        data_dir, "reference_seqs", "RVMT", "RVMT_cleaned_contigs.fasta.gz"
+    )
+    ncbi_ribovirus_fasta_path = os.path.join(
+        data_dir,
+        "reference_seqs",
+        "ncbi_virus",
+        "refseq_ribovirus_genomes_cleaned.fasta.gz",
+    )
+    deduplicated_fasta = os.path.join(masking_dir, "combined_deduplicated.fasta")
+    logger.info(
+        "Deduplicating nucleotide masking sequences from %s files",
+        len([rvmt_fasta_path, ncbi_ribovirus_fasta_path]),
+    )
+    stats = remove_duplicates(
+        input_file=[rvmt_fasta_path, ncbi_ribovirus_fasta_path],
+        output_file=deduplicated_fasta,
+        by="seq",
+        revcomp_as_distinct=False,
+        return_stats=True,
+        logger=logger,
+    )
+    if stats:
+        logger.info(
+            "Nucleotide masking stats: %s unique sequences from %s total; "
+            "%s duplicates removed",
+            stats["unique_records"],
+            stats["total_records"],
+            stats["duplicates_removed"],
+        )
+
+    entropy_masked_path = os.path.join(
+        masking_dir, "combined_entropy_masked.fasta.gz"
+    )
+    logger.info("Applying entropy masking to combined nucleotide sequences")
+    bbmask(
+        in1=deduplicated_fasta,
+        out=entropy_masked_path,
+        entropy=0.1,
+        entropywindow=30,
+        threads=threads,
+    )
+
+    compressed_path = os.path.join(masking_dir, "combined_compressed.fasta.gz")
+    logger.info("Compressing nucleotide masking sequences with kcompress")
+    kcompress(
+        in1=entropy_masked_path,
+        out=compressed_path,
+        fuse=500,
+        k=31,
+        prealloc=True,
+        threads=threads,
+    )
+    bbmask(
+        in1=compressed_path,
+        out=entropy_masked_path,
+        entropy=0.2,
+        entropywindow=25,
+        threads=threads,
+    )
+
+    rvmt_orfs_path = os.path.join(
+        data_dir, "reference_seqs", "RVMT", "RVMT_cleaned_orfs.faa.gz"
+    )
+    ncbi_orfs_path = os.path.join(
+        data_dir,
+        "reference_seqs",
+        "ncbi_virus",
+        "refseq_ribovirus_genomes_orfs_cleaned.faa.gz",
+    )
+    if not os.path.exists(ncbi_orfs_path):
+        ncbi_orfs_path = os.path.join(
+            data_dir,
+            "reference_seqs",
+            "ncbi_virus",
+            "refseq_ribovirus_genomes_orfs.faa",
+        )
+        logger.warning(
+            "Using unfiltered RefSeq protein FASTA because no cleaned copy "
+            "exists: %s",
+            ncbi_orfs_path,
+        )
+
+    deduplicated_orfs = os.path.join(
+        masking_dir, "combined_deduplicated_orfs.faa.gz"
+    )
+    logger.info(
+        "Deduplicating protein masking sequences from %s files",
+        len([rvmt_orfs_path, ncbi_orfs_path]),
+    )
+    stats = remove_duplicates(
+        input_file=[rvmt_orfs_path, ncbi_orfs_path],
+        output_file=deduplicated_orfs,
+        by="seq",
+        revcomp_as_distinct=False,
+        return_stats=True,
+        logger=logger,
+    )
+    if stats:
+        logger.info(
+            "Protein masking stats: %s unique sequences from %s total; "
+            "%s duplicates removed",
+            stats["unique_records"],
+            stats["total_records"],
+            stats["duplicates_removed"],
+        )
+
+    try:
+        os.remove(deduplicated_fasta)
+        os.remove(compressed_path)
+    except Exception as e:
+        logger.warning(f"Could not remove intermediate files: {e}")
+
+
 def prepare_contamination_seqs(data_dir, threads, logger):
     """Prepare the masking and contamination sequence sets used in sequence filtering.
     The contamination sequences refers to adapters (from bbtools and Fire lab) and rRNA sequences (SILVA + NCBI).
@@ -1415,8 +1864,6 @@ def prepare_contamination_seqs(data_dir, threads, logger):
         None
     """
 
-    logger.info("Preparing masking sequences by combining RVMT and NCBI ribovirus")
-
     # Create directories (if not already existing)
     contam_dir = os.path.join(data_dir, "contam")
     rrna_dir = os.path.join(contam_dir, "rrna")
@@ -1427,126 +1874,7 @@ def prepare_contamination_seqs(data_dir, threads, logger):
     os.makedirs(adapter_dir, exist_ok=True)
     os.makedirs(masking_dir, exist_ok=True)
 
-    # Masking sequences preparation
-    rvmt_fasta_path = os.path.join(
-        data_dir, "reference_seqs", "RVMT", "RVMT_cleaned_contigs.fasta.gz"
-    )
-    ncbi_ribovirus_fasta_path = os.path.join(
-        data_dir,
-        "reference_seqs",
-        "ncbi_virus",
-        "refseq_ribovirus_genomes.fasta",
-    )
-
-    # Deduplicate directly from multiple files (no concatenation needed)
-    deduplicated_fasta = os.path.join(masking_dir, "combined_deduplicated.fasta")
-    logger.info(
-        f"Deduplicating sequences from {len([rvmt_fasta_path, ncbi_ribovirus_fasta_path])} files"
-    )
-
-    stats = remove_duplicates(
-        input_file=[rvmt_fasta_path, ncbi_ribovirus_fasta_path],
-        output_file=deduplicated_fasta,
-        by="seq",
-        revcomp_as_distinct=False,  # Treat reverse complement as duplicate
-        return_stats=True,
-        logger=logger,
-    )
-    #     (rolypoly_tk) ➜  rolypoly git:(main) ✗ time seqkit rmdup -i  -s code/rolypoly/data/reference_seqs/RVMT/RVMT_cleaned_contigs.fasta   code/rolypoly/data/reference_seqs/ncbi_virus/refseq_ribovirus_genomes.fasta > /dev/null
-    # [INFO] 5399 duplicated records removed
-    # seqkit rmdup -i -s   > /dev/null  14.70s user 0.53s system 75% cpu 20.095 total
-    #     #(rolypoly_tk) ➜  rolypoly git:(main) ✗ time seqkit rmdup --quiet code/rolypoly/data/reference_seqs/RVMT/RVMT_cleaned_contigs.fasta   code/rolypoly/data/reference_seqs/ncbi_virus/refseq_ribovirus_genomes.fasta --quiet | seqkit stats
-    # file  format  type  num_seqs        sum_len  min_len  avg_len    max_len
-    # -     FASTA   DNA    397,135  1,582,230,847      136  3,984.1  2,473,870
-    # seqkit rmdup --quiet   --quiet  0.85s user 0.58s system 10% cpu 13.454 total
-    # seqkit stats  10.93s user 0.31s system 83% cpu 13.450 total
-    # #In [10]: remove_duplicates(
-    # ...:         input_file=[rvmt_fasta_path, ncbi_ribovirus_fasta_path],
-    # ...:         output_file=deduplicated_fasta,
-    # ...:         by="seq",
-    # ...:         revcomp_as_distinct=False,  # Treat reverse complement as duplicate
-    # ...:         return_stats=True,
-    # ...:         logger=logger
-    # ...:     )
-    # INFO     2025-11-21 12:26:16 - Processing 2 input files                                                                               sequences.py:451
-    # INFO     2025-11-21 12:26:25 - Processed 397135 records: 391736 unique, 5399 duplicates removed                                       sequences.py:597
-    # Out[10]: {'total_records': 397135, 'unique_records': 391736, 'duplicates_removed': 5399}
-
-    if stats:
-        logger.info(
-            f"Deduplication stats: {stats['unique_records']} unique sequences from {stats['total_records']} total, {stats['duplicates_removed']} duplicates removed"
-        )
-
-    # Apply entropy masking to the deduplicated sequences
-    logger.info("Applying entropy masking to combined sequences")
-    entropy_masked_path = os.path.join(
-        masking_dir, "combined_entropy_masked.fasta.gz"
-    )
-
-    bbmask(
-        in1=deduplicated_fasta,
-        out=entropy_masked_path,
-        entropy=0.1,
-        entropywindow=30,
-        threads=threads,
-    )
-
-    # reduce size with kcompress
-    logger.info("Compressing sequences with kcompress")
-    compressed_path = os.path.join(masking_dir, "combined_compressed.fasta.gz")
-
-    kcompress(
-        in1=entropy_masked_path,
-        out=compressed_path,
-        fuse=500,
-        k=31,
-        prealloc=True,
-        threads=threads,
-    )
-
-    #  now complexity masing again just to be sure
-    bbmask(
-        in1=compressed_path,
-        out=entropy_masked_path,
-        entropy=0.2,
-        entropywindow=25,
-        threads=threads,
-    )
-
-    # now a similar process for the orfs
-    rvmt_fasta_path = os.path.join(
-        data_dir, "reference_seqs", "RVMT", "RVMT_cleaned_orfs.faa.gz"
-    )
-    ncbi_ribovirus_fasta_path = os.path.join(
-        data_dir,
-        "reference_seqs",
-        "ncbi_virus",
-        "refseq_ribovirus_genomes_orfs.faa",
-    )
-
-    # Deduplicate directly from multiple files (no concatenation needed)
-    deduplicated_fasta = os.path.join(
-        masking_dir, "combined_deduplicated_orfs.faa.gz"
-    )
-
-    logger.info(
-        f"Deduplicating sequences from {len([rvmt_fasta_path, ncbi_ribovirus_fasta_path])} files"
-    )
-
-    stats = remove_duplicates(
-        input_file=[rvmt_fasta_path, ncbi_ribovirus_fasta_path],
-        output_file=deduplicated_fasta,
-        by="seq",
-        revcomp_as_distinct=False,  # Treat reverse complement as duplicate
-        return_stats=True,
-        logger=logger,
-    )
-
-    # clean up intermediate files
-    try:
-        os.remove(compressed_path)
-    except Exception as e:
-        logger.warning(f"Could not remove intermediate files: {e}")
+    prepare_masking_seqs(data_dir, threads, logger)
 
     # Prepare adapter sequences
     logger.info("Fetching adapter sequences")
@@ -1934,14 +2262,7 @@ def prepare_contamination_seqs(data_dir, threads, logger):
 
     logger.info(f"Created masked SILVA rRNA database: {silva_masked}")
 
-    # clean up
-    try:
-        os.remove(deduplicated_fasta)
-        os.remove(compressed_path)
-    except Exception as e:
-        logger.warning(f"Could not remove intermediate files: {e}")
-
-    logger.info(f"Masking sequences prepared in {masking_dir}")
+    logger.info(f"Contamination sequences prepared in {contam_dir}")
 
 
 def prepare_trna_data(data_dir, logger):
