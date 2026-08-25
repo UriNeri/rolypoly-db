@@ -3647,6 +3647,10 @@ WHERE C.member_taxid IN (SELECT taxid FROM ViralTaxid)
                     missing += 1
                     if not allow_missing_taxonomy:
                         continue
+                    # TODO: Evaluate excluding sequences labelled only as root,
+                    # or another very shallow lineage, from taxonomy-search DBs.
+                    # Keep them in provenance/audit outputs until that policy is
+                    # validated so unresolved taxonomy is never silently lost.
                     assigned = taxon_for("1")
                     method = "unresolved_root"
                     assignment_scope = "unresolved"
