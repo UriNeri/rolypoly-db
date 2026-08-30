@@ -7,15 +7,18 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
 import tarfile
+import tempfile
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import polars as pl
+import parasail
 import pyhmmer
 import requests
 from bbmapy import bbduk, bbmask, kcompress
@@ -1190,6 +1193,330 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
         output=os.path.join(mmseqs_dbs, "RVMT/RVMT"),
         msa_pattern="ali*/*.FASTA",
         info_table=None,
+    )
+
+    # Compile reviewed sparse features from NCBI CDD v3.21 fasta.tar.gz and
+    # cddannot.dat.gz (https://ftp.ncbi.nlm.nih.gov/pub/mmdb/cdd/) onto the two
+    # freshly built backend coordinate systems. The source table deliberately
+    # stops at original RVMT MSA columns; backend state numbers are always
+    # regenerated here. CDD root IDs remain in the table as the compact
+    # build-time provenance trail.
+    source_features_path = Path(__file__).with_name("rvmt_cdd_source_features.tsv")
+    source_features = pl.read_csv(source_features_path, separator="\t")
+    required_feature_columns = {
+        "profile_id",
+        "feature_id",
+        "canonical_term_id",
+        "raw_source_label",
+        "source_msa_columns_1based",
+        "cdd_root_profiles",
+        "mean_feature_coverage",
+        "mean_residue_compatibility",
+        "confidence",
+        "definition_status",
+    }
+    missing_feature_columns = required_feature_columns - set(source_features.columns)
+    if missing_feature_columns:
+        raise ValueError(
+            f"RVMT CDD source table lacks columns: {sorted(missing_feature_columns)}"
+        )
+    if source_features.select(
+        pl.struct(["profile_id", "feature_id"]).is_duplicated().any()
+    ).item():
+        raise ValueError("RVMT CDD source table contains duplicate profile/feature rows")
+    features_by_profile = {}
+    for row in source_features.to_dicts():
+        features_by_profile.setdefault(row["profile_id"], []).append(row)
+
+    source_msa_dir = Path(hmmdb_dir) / "RVMT"
+    source_msas = {}
+    for msa_path in sorted(source_msa_dir.glob("ali*/*.FASTA")):
+        if msa_path.stem in source_msas:
+            raise ValueError(f"Duplicate RVMT source MSA name: {msa_path.stem}")
+        source_msas[msa_path.stem] = msa_path
+    if len(source_msas) != 710:
+        raise ValueError(f"Expected 710 RVMT source MSAs, found {len(source_msas)}")
+
+    rvmt_hmms = {}
+    current_name = ""
+    current_length = 0
+    current_nseq = 0
+    current_map_enabled = False
+    current_states = {}
+    current_consensus = []
+    in_hmm_model = False
+    for line in (Path(hmmdb_dir) / "rvmt.hmm").read_text(encoding="utf-8").splitlines():
+        if line.startswith("NAME "):
+            current_name = line.split(maxsplit=1)[1]
+        elif line.startswith("LENG "):
+            current_length = int(line.split()[1])
+        elif line.startswith("NSEQ "):
+            current_nseq = int(line.split()[1])
+        elif line.startswith("MAP "):
+            current_map_enabled = line.split()[1] == "yes"
+        elif line.startswith("HMM "):
+            in_hmm_model = True
+        elif line == "//":
+            if not current_name:
+                continue
+            expected_states = set(range(1, current_length + 1))
+            if (
+                not current_map_enabled
+                or set(current_states) != expected_states
+                or len(current_consensus) != current_length
+            ):
+                raise ValueError(
+                    f"{current_name}: unsupported or incomplete HMM MAP rows"
+                )
+            rvmt_hmms[current_name] = {
+                "length": current_length,
+                "nseq": current_nseq,
+                "state_to_column": current_states,
+                "consensus": "".join(current_consensus).upper(),
+            }
+            current_name = ""
+            current_length = current_nseq = 0
+            current_map_enabled = False
+            current_states = {}
+            current_consensus = []
+            in_hmm_model = False
+        elif in_hmm_model:
+            fields = line.split()
+            if fields and fields[0].isdigit() and len(fields) >= 23:
+                current_states[int(fields[0])] = int(fields[21])
+                current_consensus.append(fields[22])
+    if set(rvmt_hmms) != set(source_msas):
+        raise ValueError(
+            "RVMT HMM/source-MSA inventories differ: "
+            f"{len(rvmt_hmms)} HMMs and {len(source_msas)} MSAs"
+        )
+    unknown_feature_profiles = set(features_by_profile) - set(rvmt_hmms)
+    if unknown_feature_profiles:
+        raise ValueError(
+            "CDD labels refer to absent RVMT profiles: "
+            f"{sorted(unknown_feature_profiles)[:5]}"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="rolypoly-rvmt-features-") as temp_dir:
+        temp_dir = Path(temp_dir)
+        mmseqs_consensus_db = temp_dir / "rvmt_consensus"
+        mmseqs_consensus_fasta = temp_dir / "rvmt_consensus.faa"
+        if not run_command_comp(
+            base_cmd="mmseqs profile2consensus",
+            positional_args=[
+                os.path.join(mmseqs_dbs, "RVMT/RVMT"),
+                str(mmseqs_consensus_db),
+            ],
+            positional_args_location="start",
+            params={"threads": min(threads, 6)},
+            output_file=str(mmseqs_consensus_db),
+            logger=logger,
+        ):
+            raise RuntimeError("MMseqs2 could not export the RVMT consensuses")
+        if not run_command_comp(
+            base_cmd="mmseqs convert2fasta",
+            positional_args=[
+                str(mmseqs_consensus_db),
+                str(mmseqs_consensus_fasta),
+            ],
+            positional_args_location="start",
+            output_file=str(mmseqs_consensus_fasta),
+            logger=logger,
+        ):
+            raise RuntimeError("MMseqs2 could not write the RVMT consensus FASTA")
+        mmseqs_consensus = {
+            header.split()[0]: sequence
+            for header, sequence in from_fastx_eager(mmseqs_consensus_fasta)
+            .select("header", "sequence")
+            .iter_rows()
+        }
+    if set(mmseqs_consensus) != set(rvmt_hmms):
+        raise ValueError(
+            "RVMT MMseqs/HMM profile inventories differ: "
+            f"{len(mmseqs_consensus)} MMseqs profiles and {len(rvmt_hmms)} HMMs"
+        )
+
+    annotated_msa_dir = Path(profile_dir) / "marker_msas" / "RVMT"
+    annotated_msa_dir.mkdir(parents=True, exist_ok=True)
+    for stale_stockholm in annotated_msa_dir.glob("*.sto"):
+        stale_stockholm.unlink()
+    marker_feature_rows = []
+    for profile_id in sorted(rvmt_hmms):
+        model = rvmt_hmms[profile_id]
+        state_to_column = model["state_to_column"]
+        column_to_state = {column: state for state, column in state_to_column.items()}
+        if len(column_to_state) != len(state_to_column):
+            raise ValueError(f"{profile_id}: duplicate source columns in HMM MAP")
+
+        traceback = parasail.nw_trace_scan_16(
+            model["consensus"],
+            mmseqs_consensus[profile_id].upper(),
+            10,
+            1,
+            parasail.blosum62,
+        ).traceback
+        hmm_position = mmseqs_position = 0
+        hmm_to_mmseqs = {}
+        aligned_pairs = identical_pairs = 0
+        for hmm_residue, mmseqs_residue in zip(traceback.query, traceback.ref):
+            if hmm_residue != "-":
+                hmm_position += 1
+            if mmseqs_residue != "-":
+                mmseqs_position += 1
+            if hmm_residue != "-" and mmseqs_residue != "-":
+                hmm_to_mmseqs[hmm_position] = mmseqs_position
+                aligned_pairs += 1
+                identical_pairs += hmm_residue.upper() == mmseqs_residue.upper()
+        if hmm_position != model["length"] or mmseqs_position != len(
+            mmseqs_consensus[profile_id]
+        ):
+            raise ValueError(f"{profile_id}: consensus bridge did not consume both profiles")
+        mapped_pairs = list(hmm_to_mmseqs.items())
+        if mapped_pairs != sorted(mapped_pairs) or any(
+            next_pair[1] <= pair[1]
+            for pair, next_pair in zip(mapped_pairs, mapped_pairs[1:])
+        ):
+            raise ValueError(f"{profile_id}: non-monotonic backend state bridge")
+
+        records = []
+        header = ""
+        sequence_parts = []
+        for line in source_msas[profile_id].read_text(encoding="utf-8").splitlines():
+            if line.startswith(">"):
+                if header:
+                    records.append((header, "".join(sequence_parts)))
+                header, sequence_parts = line[1:].strip(), []
+            elif line.strip():
+                sequence_parts.append(line.strip())
+        if header:
+            records.append((header, "".join(sequence_parts)))
+        widths = {len(sequence) for _, sequence in records}
+        if not records or len(widths) != 1:
+            raise ValueError(f"{profile_id}: source MSA is empty or non-rectangular")
+        msa_width = widths.pop()
+        if len(records) != model["nseq"]:
+            raise ValueError(f"{profile_id}: source rows differ from HMM NSEQ")
+        if max(column_to_state) > msa_width:
+            raise ValueError(f"{profile_id}: HMM MAP exceeds source MSA width")
+
+        feature_columns = {}
+        for feature in sorted(
+            features_by_profile.get(profile_id, []),
+            key=lambda row: row["canonical_term_id"],
+        ):
+            motif = feature["canonical_term_id"].rsplit(":", 1)[-1]
+            source_columns = [
+                int(value)
+                for value in feature["source_msa_columns_1based"].split(";")
+                if value
+            ]
+            if not source_columns or min(source_columns) < 1 or max(source_columns) > msa_width:
+                raise ValueError(f"{profile_id}/{motif}: invalid source-MSA columns")
+            feature_columns[motif] = set(source_columns)
+            hmmer_states = [
+                column_to_state[column]
+                for column in source_columns
+                if column in column_to_state
+            ]
+            unmapped_source_columns = [
+                column for column in source_columns if column not in column_to_state
+            ]
+            mmseqs_states = [
+                hmm_to_mmseqs[state] for state in hmmer_states if state in hmm_to_mmseqs
+            ]
+            unmapped_hmmer_states = [
+                state for state in hmmer_states if state not in hmm_to_mmseqs
+            ]
+            marker_feature_rows.append(
+                {
+                    "marker_db": "rvmt",
+                    "profile_id": profile_id,
+                    "feature_id": feature["feature_id"],
+                    "canonical_term_id": feature["canonical_term_id"],
+                    "raw_source_label": feature["raw_source_label"],
+                    "source_msa_columns_1based": ";".join(map(str, source_columns)),
+                    "hmmer_states_1based": ";".join(map(str, hmmer_states)),
+                    "unmapped_source_msa_columns_1based": ";".join(
+                        map(str, unmapped_source_columns)
+                    ),
+                    "mmseqs_states_1based": ";".join(map(str, mmseqs_states)),
+                    "unmapped_hmmer_states_for_mmseqs": ";".join(
+                        map(str, unmapped_hmmer_states)
+                    ),
+                    "cdd_root_profiles": feature["cdd_root_profiles"],
+                    "mean_feature_coverage": feature["mean_feature_coverage"],
+                    "mean_residue_compatibility": feature[
+                        "mean_residue_compatibility"
+                    ],
+                    "confidence": feature["confidence"],
+                    "definition_status": feature["definition_status"],
+                    "hmm_mmseqs_consensus_identity": round(
+                        identical_pairs / aligned_pairs, 4
+                    ),
+                    "hmmer_mapping_status": (
+                        "complete" if not unmapped_source_columns else "partial"
+                    ),
+                    "mmseqs_mapping_status": (
+                        "complete" if not unmapped_hmmer_states else "partial"
+                    ),
+                }
+            )
+
+        seen_names = {}
+        stockholm_names = []
+        for index, (record_header, _) in enumerate(records, start=1):
+            base_name = re.sub(r"[^A-Za-z0-9_.|:-]", "_", record_header.split()[0])
+            base_name = base_name or f"sequence_{index:04d}"
+            seen_names[base_name] = seen_names.get(base_name, 0) + 1
+            stockholm_names.append(
+                base_name
+                if seen_names[base_name] == 1
+                else f"{base_name}_{seen_names[base_name]}"
+            )
+        name_width = max(map(len, stockholm_names))
+        stockholm_lines = [
+            "# STOCKHOLM 1.0",
+            f"#=GF ID {profile_id}",
+            "#=GF CC Sparse CDD-derived RdRp feature tracks on the RVMT source MSA",
+        ]
+        for stockholm_name, (_, sequence) in zip(stockholm_names, records):
+            clean_sequence = sequence.replace(".", "-").replace("*", "X")
+            stockholm_lines.append(
+                f"{stockholm_name.ljust(name_width)} {clean_sequence}"
+            )
+        rf_track = ["."] * msa_width
+        for source_column in column_to_state:
+            rf_track[source_column - 1] = "x"
+        stockholm_lines.append(
+            f"#=GC {'RF'.ljust(max(1, name_width - 5))} {''.join(rf_track)}"
+        )
+        for motif in sorted(feature_columns):
+            motif_track = ["."] * msa_width
+            for source_column in feature_columns[motif]:
+                motif_track[source_column - 1] = motif
+            stockholm_lines.append(
+                f"#=GC {('CDD_' + motif).ljust(max(1, name_width - 5))} "
+                f"{''.join(motif_track)}"
+            )
+        stockholm_lines.append("//")
+        (annotated_msa_dir / f"{profile_id}.sto").write_text(
+            "\n".join(stockholm_lines) + "\n", encoding="utf-8"
+        )
+
+    if len(marker_feature_rows) != source_features.height:
+        raise ValueError(
+            "Not every reviewed RVMT CDD feature was compiled: "
+            f"{len(marker_feature_rows)} of {source_features.height}"
+        )
+    pl.DataFrame(marker_feature_rows).write_csv(
+        Path(profile_dir) / "marker_features.tsv.gz",
+        separator="\t",
+        compression="gzip",
+    )
+    logger.info(
+        "Wrote %s reviewed RVMT feature rows and %s annotated Stockholm MSAs",
+        len(marker_feature_rows),
+        len(rvmt_hmms),
     )
 
     # now for nvpc
