@@ -1043,33 +1043,80 @@ def prepare_pfam_rdrps_rt(data_dir, threads, logger: logging.Logger):
     os.makedirs(hmmdb_dir, exist_ok=True)
     fetch_and_extract(url=pfam_hmm_url, fetched_to=pfam_gz_path, extract_to=hmmdb_dir)
 
-    RdRps_and_RTs = [
-        "PF04197.18",  # Birnavirus RNA dependent RNA polymerase (VP1), palm domain
-        "PF04196.18",  # Bunyavirus RNA dependent RNA polymerase
-        "PF22212.2",  # CPV, RNA-directed RNA polymerase, central polymerase domain
-        "PF22152.2",  # Permutotetravirus RNA-dependent RNA polymerase palm domain
-        "PF22260.2",  # Permutotetravirus RNA-dependent RNA polymerase thumb domain
-        "PF00680.26",  # Viral RNA-dependent RNA polymerase
-        "PF00978.27",  # RNA dependent RNA polymerase
-        "PF00998.29",  # Viral RNA-directed RNA-polymerase
-        "PF02123.22",  # Viral RNA-directed RNA-polymerase
-        "PF07925.16",  # Reovirus RNA-dependent RNA polymerase lambda 3
-        "PF00078.33",  # Reverse transcriptase
-        "PF07727.20",  # Reverse transcriptase
-        "PF13456.13",  # Reverse transcriptase-like
+    pfam_profiles = [
+        ("Birna_RdRp_palm", "PF04197.18", "rdrp", "Birnavirus RdRp palm domain"),
+        ("Bunya_RdRp", "PF04196.18", "rdrp", "Bunyavirus RdRp"),
+        ("CPV_RdRP_pol_dom", "PF22212.2", "rdrp", "CPV central polymerase domain"),
+        ("Permu_RdRp_palm", "PF22152.2", "rdrp", "Permutotetravirus RdRp palm domain"),
+        ("Permu_RdRp_thumb", "PF22260.2", "rdrp", "Permutotetravirus RdRp thumb domain"),
+        ("RdRP_1", "PF00680.26", "rdrp", "Viral RdRp"),
+        ("RdRP_2", "PF00978.27", "rdrp", "RdRp"),
+        ("RdRP_3", "PF00998.29", "rdrp", "Viral RdRp"),
+        ("RdRP_4", "PF02123.22", "rdrp", "Viral RdRp"),
+        ("RdRP_5", "PF07925.16", "rdrp", "Reovirus lambda 3 RdRp"),
+        ("RVT_1", "PF00078.33", "rt", "Reverse transcriptase"),
+        ("RVT_2", "PF07727.20", "rt", "Reverse transcriptase"),
+        ("RVT_3", "PF13456.13", "rt", "Reverse-transcriptase-like"),
     ]
+    pfam_profile_rows = [
+        {
+            "database_id": "Pfam_RTs_RdRp",
+            "profile_name": name,
+            "profile_accession": accession,
+            "profile_accession_base": accession.split(".")[0],
+            "mmseqs_target": f"{accession.split('.')[0]}_seed",
+            "profile_class": profile_class,
+            "description": description,
+            "source_release": "Pfam 38.2",
+            "source_url": pfam_hmm_url,
+        }
+        for name, accession, profile_class, description in pfam_profiles
+    ]
+    if (
+        len(pfam_profile_rows) != 13
+        or len({row["profile_name"] for row in pfam_profile_rows}) != 13
+        or len({row["profile_accession"] for row in pfam_profile_rows}) != 13
+        or len({row["profile_accession_base"] for row in pfam_profile_rows}) != 13
+        or len({row["mmseqs_target"] for row in pfam_profile_rows}) != 13
+        or sum(row["profile_class"] == "rdrp" for row in pfam_profile_rows) != 10
+        or sum(row["profile_class"] == "rt" for row in pfam_profile_rows) != 3
+    ):
+        raise ValueError("Pfam RdRp/RT profile partition is not one-to-one (10 RdRp, 3 RT)")
+
+    pfam_profile_manifest = Path(data_dir) / "profiles" / "pfam_rdrps_and_rts_profiles.tsv.gz"
+    pl.DataFrame(pfam_profile_rows).write_csv(
+        pfam_profile_manifest, separator="\t", compression="gzip"
+    )
 
     # Use hmmfetch to extract the small set of Pfam HMMs we care about
     selected_pfam_output = os.path.join(hmmdb_dir, "pfam_rdrps_and_rts.hmm")
     from rolypoly.utils.bio.alignments import hmm_fetch
 
     hmm_fetch(
-        accessions=RdRps_and_RTs,
+        accessions=[row["profile_accession"] for row in pfam_profile_rows],
         hmm_db=os.path.join(hmmdb_dir, "Pfam-A.hmm"),
         output=selected_pfam_output,
         strip_after_char=".",
         logger=logger,
     )
+    with pyhmmer.plan7.HMMFile(selected_pfam_output) as hmms:
+        built_hmms = [
+            (
+                hmm.name.decode() if isinstance(hmm.name, bytes) else str(hmm.name),
+                (
+                    hmm.accession.decode()
+                    if isinstance(hmm.accession, bytes)
+                    else str(hmm.accession or "")
+                ),
+            )
+            for hmm in hmms
+        ]
+    expected_hmms = {
+        (row["profile_name"], row["profile_accession"])
+        for row in pfam_profile_rows
+    }
+    if len(built_hmms) != 13 or set(built_hmms) != expected_hmms:
+        raise ValueError("Built Pfam HMM members do not match the 13-row profile manifest")
 
     # MMseqs2's built-in Pfam downloader still uses EBI's retired FTP endpoint.
     # Download the pinned seed over HTTPS and reproduce its convertmsa/msa2profile
@@ -1129,8 +1176,10 @@ def prepare_pfam_rdrps_rt(data_dir, threads, logger: logging.Logger):
 
     # fetch Pfam MSAs for these accessions
     pfam_msa_folder = os.path.join(hmmdb_dir, "pfam_msas")
-    os.makedirs(pfam_msa_folder, exist_ok=True)
-    for acc in [acc.split(".")[0] for acc in RdRps_and_RTs]:
+    if os.path.exists(pfam_msa_folder):
+        shutil.rmtree(pfam_msa_folder)
+    os.makedirs(pfam_msa_folder)
+    for acc in [row["profile_accession_base"] for row in pfam_profile_rows]:
         fetchPfamMSA(acc=acc, output_folder=pfam_msa_folder, logger=logger)
         logger.info(f"Fetched MSA for Pfam accession {acc}")
     # build mmseqs profile db from these msas
@@ -1139,7 +1188,18 @@ def prepare_pfam_rdrps_rt(data_dir, threads, logger: logging.Logger):
         output=os.path.join(mmseqs_dbs, "pfam_rdrps_and_rts/pfam_rdrps_and_rts"),
         msa_pattern="*.sth",
         info_table=None,
+        threads=threads,
     )
+    pfam_mmseqs_output = Path(mmseqs_dbs) / "pfam_rdrps_and_rts" / "pfam_rdrps_and_rts"
+    mmseqs_headers = {
+        entry.split(maxsplit=1)[0]
+        for entry in Path(f"{pfam_mmseqs_output}_h").read_bytes().split(b"\0")
+        if entry.strip()
+    }
+    mmseqs_headers = {header.decode() for header in mmseqs_headers}
+    expected_mmseqs_headers = {row["mmseqs_target"] for row in pfam_profile_rows}
+    if mmseqs_headers != expected_mmseqs_headers:
+        raise ValueError("Built Pfam MMseqs members do not match the 13-row profile manifest")
 
     # clean up downloaded gz
     try:
@@ -1934,10 +1994,12 @@ def prepare_rvmt_motifs(data_dir, threads, logger):
 
     logger.info("Preparing RVMT motif sequences")
     motif_dir = os.path.join(data_dir, "profiles/rvmt_motifs")
-    motif_alignments_dir = os.path.join(motif_dir, "Sequence_Library")
+    motif_alignments_dir = os.path.join(motif_dir, "build_alignments", "rdrp")
+    rt_motif_alignments_dir = os.path.join(motif_dir, "build_alignments", "rt")
 
     os.makedirs(motif_dir, exist_ok=True)
     os.makedirs(motif_alignments_dir, exist_ok=True)
+    os.makedirs(rt_motif_alignments_dir, exist_ok=True)
 
     motif_archive = os.path.join(data_dir, "profiles/motif_sequence_library.tar.gz")
     # fetch motif archive
@@ -1960,8 +2022,14 @@ def prepare_rvmt_motifs(data_dir, threads, logger):
 
     # Process each motif type directory
     motif_metadata = {}
+    motif_profile_rows = []
+    rt_source_paths = {
+        f"mot.{motif_number}/mot.{motif_number}.25.0.{source_number}_woCon.afa"
+        for motif_number in (1, 2, 3)
+        for source_number in (1, 2)
+    }
 
-    for motif_type_dir in os.listdir(sequence_library_dir):
+    for motif_type_dir in sorted(os.listdir(sequence_library_dir)):
         if not motif_type_dir.startswith("mot."):
             continue
 
@@ -1981,27 +2049,76 @@ def prepare_rvmt_motifs(data_dir, threads, logger):
         logger.info(f"Processing motif type {motif_letter} ({motif_type_dir})")
 
         # Copy alignment files to organized structure
-        for afa_file in os.listdir(motif_type_path):
+        for afa_file in sorted(os.listdir(motif_type_path)):
             if afa_file.endswith(".afa"):
                 src = os.path.join(motif_type_path, afa_file)
                 # Create descriptive filename: motifA_taxon_id.afa
                 base_name = afa_file.replace(".afa", "")
                 new_name = f"motif{motif_letter}_{base_name}.afa"
-                dst = os.path.join(motif_alignments_dir, new_name)
+                source_archive_path = f"{motif_type_dir}/{afa_file}"
+                profile_class = (
+                    "rt" if source_archive_path in rt_source_paths else "rdrp"
+                )
+                build_alignment_dir = (
+                    rt_motif_alignments_dir
+                    if profile_class == "rt"
+                    else motif_alignments_dir
+                )
+                dst = os.path.join(build_alignment_dir, new_name)
                 shutil.copy2(src, dst)
 
-                # Store metadata
-                motif_metadata[new_name.replace(".afa", "")] = {
-                    "motif_type": motif_letter,
-                    "original_name": afa_file,
-                    "taxon": base_name,  # this is a placeholder for if eventually the taxon info is incorporated.
-                    "file_path": dst,
-                }
+                profile_name = new_name.replace(".afa", "")
+                if profile_class == "rdrp":
+                    motif_metadata[profile_name] = {
+                        "motif_type": motif_letter,
+                        "original_name": afa_file,
+                        "taxon": base_name,
+                    }
+                motif_profile_rows.append(
+                    {
+                        "database_id": (
+                            "rvmt_rt_motifs"
+                            if profile_class == "rt"
+                            else "rvmt_motifs"
+                        ),
+                        "profile_name": profile_name,
+                        "profile_class": profile_class,
+                        "motif_type": motif_letter,
+                        "source_term": f"rvmt:{motif_type_dir}",
+                        "original_name": afa_file,
+                        "source_archive_path": (
+                            f"Sequence_Library/{source_archive_path}"
+                        ),
+                        "source_release": "RiboV1.4",
+                        "source_url": (
+                            "https://portal.nersc.gov/dna/microbial/prokpubs/"
+                            "Riboviria/RiboV1.4/rdrps/motif_sequence_library.tar.gz"
+                        ),
+                    }
+                )
+
+    observed_rt_sources = {
+        row["source_archive_path"].removeprefix("Sequence_Library/")
+        for row in motif_profile_rows
+        if row["profile_class"] == "rt"
+    }
+    if observed_rt_sources != rt_source_paths:
+        raise ValueError("RVMT RT motif partition does not match the six reviewed source MSAs")
+    if (
+        len(motif_profile_rows) != 1173
+        or len(motif_metadata) != 1167
+        or len({row["profile_name"] for row in motif_profile_rows}) != 1173
+    ):
+        raise ValueError("RVMT motif source inventory is not the expected 1,167 RdRp + 6 RT profiles")
 
     # Save metadata
     metadata_file = os.path.join(motif_dir, "motif_metadata.json")
     with open(metadata_file, "w") as f:
         json.dump(motif_metadata, f, indent=2)
+    motif_profile_manifest = Path(data_dir) / "profiles" / "rvmt_motif_profiles.tsv.gz"
+    pl.DataFrame(motif_profile_rows).write_csv(
+        motif_profile_manifest, separator="\t", compression="gzip"
+    )
 
     logger.info(f"Processed {len(motif_metadata)} motif alignments")
 
@@ -2014,6 +2131,18 @@ def prepare_rvmt_motifs(data_dir, threads, logger):
         output=output_hmm,
         msa_pattern="*.afa",
         info_table=None,  # We'll use our metadata file instead
+        name_col=None,
+        accs_col=None,
+        desc_col=None,
+    )
+    rt_output_hmm = os.path.join(
+        data_dir, "profiles/hmmdbs", "rvmt_rt_motifs.hmm"
+    )
+    hmmdb_from_directory(
+        msa_dir=rt_motif_alignments_dir,
+        output=rt_output_hmm,
+        msa_pattern="*.afa",
+        info_table=None,
         name_col=None,
         accs_col=None,
         desc_col=None,
@@ -2034,18 +2163,76 @@ def prepare_rvmt_motifs(data_dir, threads, logger):
         name_col=None,
         accs_col=None,
         desc_col=None,
+        threads=threads,
     )
+    rt_mmseqs_output = os.path.join(
+        data_dir, "profiles/mmseqs_dbs/rvmt_rt_motifs", "rvmt_rt_motifs"
+    )
+    os.makedirs(os.path.dirname(rt_mmseqs_output), exist_ok=True)
+    mmseqs_profile_db_from_directory(
+        msa_dir=rt_motif_alignments_dir,
+        output=rt_mmseqs_output,
+        info_table=None,
+        msa_pattern="*.afa",
+        name_col=None,
+        accs_col=None,
+        desc_col=None,
+        threads=threads,
+    )
+
+    expected_main_profiles = {
+        row["profile_name"]
+        for row in motif_profile_rows
+        if row["profile_class"] == "rdrp"
+    }
+    expected_rt_profiles = {
+        row["profile_name"]
+        for row in motif_profile_rows
+        if row["profile_class"] == "rt"
+    }
+    with pyhmmer.plan7.HMMFile(output_hmm) as hmms:
+        built_main_hmms = [
+            hmm.name.decode() if isinstance(hmm.name, bytes) else str(hmm.name)
+            for hmm in hmms
+        ]
+    with pyhmmer.plan7.HMMFile(rt_output_hmm) as hmms:
+        built_rt_hmms = [
+            hmm.name.decode() if isinstance(hmm.name, bytes) else str(hmm.name)
+            for hmm in hmms
+        ]
+    main_mmseqs_headers = {
+        entry.split(maxsplit=1)[0].decode()
+        for entry in Path(f"{mmseqs_output}_h").read_bytes().split(b"\0")
+        if entry.strip()
+    }
+    rt_mmseqs_headers = {
+        entry.split(maxsplit=1)[0].decode()
+        for entry in Path(f"{rt_mmseqs_output}_h").read_bytes().split(b"\0")
+        if entry.strip()
+    }
+    if (
+        len(built_main_hmms) != 1167
+        or set(built_main_hmms) != expected_main_profiles
+        or main_mmseqs_headers != expected_main_profiles
+        or len(built_rt_hmms) != 6
+        or set(built_rt_hmms) != expected_rt_profiles
+        or rt_mmseqs_headers != expected_rt_profiles
+        or expected_main_profiles & expected_rt_profiles
+    ):
+        raise ValueError("Built RVMT motif databases do not match the reviewed profile partition")
 
     # place holder for dimanond db creation
 
     # Clean up extracted directory
     try:
-        # move the metadata file out before removing
-        shutil.move(metadata_file, os.path.join(data_dir, "profiles"))
+        # move the compatibility metadata file out before removing build inputs
+        shutil.move(
+            metadata_file,
+            os.path.join(data_dir, "profiles", "motif_metadata.json"),
+        )
 
         shutil.rmtree(motif_dir)
         os.remove(motif_archive)
-        os.remove(os.path.join(motif_dir, "motif_sequence_library.tar.gz"))
 
     except Exception as e:
         logger.warning(f"Could not remove motif alignments directory: {e}")
@@ -2053,6 +2240,8 @@ def prepare_rvmt_motifs(data_dir, threads, logger):
     # logger.info(f"RVMT motif preparation completed. Metadata saved to: {metadata_file}")
     logger.info(f"HMM database: {output_hmm}")
     logger.info(f"MMseqs database: {mmseqs_output}")
+    logger.info(f"RT HMM evidence database: {rt_output_hmm}")
+    logger.info(f"RT MMseqs evidence database: {rt_mmseqs_output}")
 
     return True
 
