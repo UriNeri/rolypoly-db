@@ -15,6 +15,13 @@
     "masking_protein": "contam/masking/combined_deduplicated_orfs.faa.gz",
     "rrna_genome_mapping": "contam/rrna/rrna_to_genome_mapping.parquet",
     "rfam_pressed_cm": "profiles/cm/Rfam.cm",
+    "marker_features": "profiles/marker_features.tsv.gz",
+    "pfam_rdrp_rt_profiles": "profiles/pfam_rdrps_and_rts_profiles.tsv.gz",
+    "rvmt_motif_profiles": "profiles/rvmt_motif_profiles.tsv.gz",
+    "rvmt_motifs_hmm": "profiles/hmmdbs/rvmt_motifs.hmm",
+    "rvmt_rt_motifs_hmm": "profiles/hmmdbs/rvmt_rt_motifs.hmm",
+    "rvmt_motifs_mmseqs": "profiles/mmseqs_dbs/rvmt_motifs/rvmt_motifs",
+    "rvmt_rt_motifs_mmseqs": "profiles/mmseqs_dbs/rvmt_rt_motifs/rvmt_rt_motifs",
     "profile_hmms": "profiles/hmmdbs",
     "profile_mmseqs": "profiles/mmseqs_dbs"
   },
@@ -53,6 +60,7 @@
       ]
     },
     "exclude": [
+      ".release_backups/**",
       "**/*.aria2",
       "**/*.partial",
       "**/*.pid",
