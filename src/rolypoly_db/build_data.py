@@ -3,6 +3,7 @@ Not meant to be run directly in entirety.
 """
 
 import datetime
+import gzip
 import hashlib
 import json
 import logging
@@ -525,7 +526,10 @@ def download_and_extract_rfam(data_dir, logger):
         and processes them for use with Infernal.
     """
 
-    rfam_url = "https://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.cm.gz"
+    # Pin models and family metadata together; refresh this release as one unit.
+    rfam_release = "15.1"
+    rfam_base_url = f"https://ftp.ebi.ac.uk/pub/databases/Rfam/{rfam_release}"
+    rfam_url = f"{rfam_base_url}/Rfam.cm.gz"
     rfam_extract_path = Path(data_dir) / "profiles" / "cm"
     rfam_cm_path = rfam_extract_path / "Rfam.cm"
 
@@ -535,6 +539,47 @@ def download_and_extract_rfam(data_dir, logger):
         logger.info("Rfam database downloaded and extracted successfully.")
     except requests.exceptions.RequestException as e:
         logger.error(f"Error downloading Rfam database: {e}")
+        raise
+
+    family_url = f"{rfam_base_url}/database_files/family.txt.gz"
+    family_path = rfam_extract_path / "family.txt.gz"
+    simple_fetch(family_url, family_path, logger=logger)
+    with gzip.open(family_path, "rb") as handle:
+        families = pl.read_csv(
+            handle.read(), separator="\t", has_header=False,
+            quote_char=None, infer_schema=False, encoding="iso8859-1",
+        )
+    if families.width != 35:
+        raise ValueError(
+            f"Unexpected Rfam {rfam_release} family schema: {families.width} columns"
+        )
+    metadata = families.select(
+        pl.col("column_1").alias("rfam_id"),
+        pl.col("column_2").alias("profile_name"),
+        pl.col("column_4").alias("rfam_description"),
+        pl.col("column_19").alias("rfam_type"),
+        pl.lit(rfam_release).alias("rfam_release"),
+        pl.lit(family_url).alias("metadata_source"),
+    ).sort("rfam_id")
+    if metadata["rfam_id"].n_unique() != metadata.height:
+        raise ValueError("Rfam family metadata contains duplicate accessions")
+    metadata_path = Path(data_dir) / "profiles/rfam_family.tsv.gz"
+    with gzip.open(metadata_path, "wb") as handle:
+        metadata.write_csv(handle, separator="\t")
+    provenance = {
+        "release": rfam_release,
+        "model_url": rfam_url,
+        "metadata_url": family_url,
+        "source_sha256": hashlib.sha256(family_path.read_bytes()).hexdigest(),
+        "output_sha256": hashlib.sha256(metadata_path.read_bytes()).hexdigest(),
+        "rows": metadata.height,
+        "columns": metadata.columns,
+    }
+    metadata_path.with_suffix(".build.json").write_text(
+        json.dumps(provenance, indent=2) + "\n"
+    )
+    family_path.unlink()
+    logger.info("Wrote %d curated Rfam families to %s", metadata.height, metadata_path)
 
     # press the cm file
     cmpress_success = run_command_comp(
