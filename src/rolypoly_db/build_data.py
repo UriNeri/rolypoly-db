@@ -68,6 +68,7 @@ BUILD_STEPS = (
     "genomad",
     "rdrp-scan",
     "rvmt-profiles",
+    "rvmt-features",
     "rvmt-sequences",
     "neordrp",
     "ncbi-virus-nucleotide",
@@ -276,8 +277,14 @@ def build_data(
     if "rdrp-scan" in selected_steps:
         prepare_rdrp_scan(data_dir, threads, logger)
 
+    if "pfam" in selected_steps:
+        # Before the RVMT steps: feature compilation reads the Pfam companion products.
+        prepare_pfam_rdrps_rt(data_dir, threads, logger)
+
     if "rvmt-profiles" in selected_steps:
         prepare_RVMT_profiles(data_dir, threads, logger)
+    elif "rvmt-features" in selected_steps:
+        prepare_RVMT_profiles(data_dir, threads, logger, features_only=True)
 
     if "rvmt-sequences" in selected_steps:
         prepare_rvmt_mmseqs(data_dir, threads, logger)
@@ -303,9 +310,6 @@ def build_data(
             force=force,
             allow_missing_taxonomy=allow_missing_taxonomy,
         )
-
-    if "pfam" in selected_steps:
-        prepare_pfam_rdrps_rt(data_dir, threads, logger)
 
     if "vfam" in selected_steps:
         prepare_vfam(data_dir, logger)
@@ -1086,14 +1090,59 @@ def prepare_pfam_rdrps_rt(data_dir, threads, logger: logging.Logger):
     pfam_gz_path = os.path.join(hmmdb_dir, "Pfam-A.hmm.gz")
     pfam_seed_path = os.path.join(hmmdb_dir, "Pfam-A.seed.gz")
     os.makedirs(hmmdb_dir, exist_ok=True)
-    fetch_and_extract(url=pfam_hmm_url, fetched_to=pfam_gz_path, extract_to=hmmdb_dir)
+    pfam_hmm_path = Path(hmmdb_dir) / "Pfam-A.hmm"
+    pfam_hmm_sha256 = (
+        "4b0da6399b97d2b23329de82190b2e5705bde1dea4cb2d028a52712d5966739e"
+    )
+    existing_pfam_hmm_sha256 = None
+    if pfam_hmm_path.exists():
+        digest = hashlib.sha256()
+        with pfam_hmm_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        existing_pfam_hmm_sha256 = digest.hexdigest()
+    if existing_pfam_hmm_sha256 == pfam_hmm_sha256:
+        logger.info("Reusing the existing Pfam 38.2 HMM database")
+    else:
+        pfam_hmm_path.unlink(missing_ok=True)
+        fetch_and_extract(
+            url=pfam_hmm_url,
+            fetched_to=pfam_gz_path,
+            extract_to=hmmdb_dir,
+        )
+        digest = hashlib.sha256()
+        with pfam_hmm_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != pfam_hmm_sha256:
+            raise ValueError(
+                "Downloaded Pfam 38.2 HMM database failed SHA-256 validation"
+            )
 
     pfam_profiles = [
+        ("Arena_RNA_pol", "PF06317.17", "rdrp", "Arenavirus RNA polymerase"),
         ("Birna_RdRp_palm", "PF04197.18", "rdrp", "Birnavirus RdRp palm domain"),
         ("Bunya_RdRp", "PF04196.18", "rdrp", "Bunyavirus RdRp"),
         ("CPV_RdRP_pol_dom", "PF22212.2", "rdrp", "CPV central polymerase domain"),
+        (
+            "Flu_PB1",
+            "PF00602.23",
+            "rdrp",
+            "Influenza RNA-dependent RNA polymerase subunit PB1",
+        ),
+        (
+            "Mononeg_RNA_pol",
+            "PF00946.25",
+            "rdrp",
+            "Mononegavirales RNA-dependent RNA polymerase",
+        ),
         ("Permu_RdRp_palm", "PF22152.2", "rdrp", "Permutotetravirus RdRp palm domain"),
-        ("Permu_RdRp_thumb", "PF22260.2", "rdrp", "Permutotetravirus RdRp thumb domain"),
+        (
+            "Permu_RdRp_thumb",
+            "PF22260.2",
+            "rdrp",
+            "Permutotetravirus RdRp thumb domain",
+        ),
         ("RdRP_1", "PF00680.26", "rdrp", "Viral RdRp"),
         ("RdRP_2", "PF00978.27", "rdrp", "RdRp"),
         ("RdRP_3", "PF00998.29", "rdrp", "Viral RdRp"),
@@ -1109,7 +1158,7 @@ def prepare_pfam_rdrps_rt(data_dir, threads, logger: logging.Logger):
             "profile_name": name,
             "profile_accession": accession,
             "profile_accession_base": accession.split(".")[0],
-            "mmseqs_target": f"{accession.split('.')[0]}_seed",
+            "mmseqs_target": accession,
             "profile_class": profile_class,
             "description": description,
             "source_release": "Pfam 38.2",
@@ -1117,18 +1166,27 @@ def prepare_pfam_rdrps_rt(data_dir, threads, logger: logging.Logger):
         }
         for name, accession, profile_class, description in pfam_profiles
     ]
+    expected_profile_count = 16
     if (
-        len(pfam_profile_rows) != 13
-        or len({row["profile_name"] for row in pfam_profile_rows}) != 13
-        or len({row["profile_accession"] for row in pfam_profile_rows}) != 13
-        or len({row["profile_accession_base"] for row in pfam_profile_rows}) != 13
-        or len({row["mmseqs_target"] for row in pfam_profile_rows}) != 13
-        or sum(row["profile_class"] == "rdrp" for row in pfam_profile_rows) != 10
+        len(pfam_profile_rows) != expected_profile_count
+        or len({row["profile_name"] for row in pfam_profile_rows})
+        != expected_profile_count
+        or len({row["profile_accession"] for row in pfam_profile_rows})
+        != expected_profile_count
+        or len({row["profile_accession_base"] for row in pfam_profile_rows})
+        != expected_profile_count
+        or len({row["mmseqs_target"] for row in pfam_profile_rows})
+        != expected_profile_count
+        or sum(row["profile_class"] == "rdrp" for row in pfam_profile_rows) != 13
         or sum(row["profile_class"] == "rt" for row in pfam_profile_rows) != 3
     ):
-        raise ValueError("Pfam RdRp/RT profile partition is not one-to-one (10 RdRp, 3 RT)")
+        raise ValueError(
+            "Pfam RdRp/RT profile partition is not one-to-one (13 RdRp, 3 RT)"
+        )
 
-    pfam_profile_manifest = Path(data_dir) / "profiles" / "pfam_rdrps_and_rts_profiles.tsv.gz"
+    pfam_profile_manifest = (
+        Path(data_dir) / "profiles" / "pfam_rdrps_and_rts_profiles.tsv.gz"
+    )
     pl.DataFrame(pfam_profile_rows).write_csv(
         pfam_profile_manifest, separator="\t", compression="gzip"
     )
@@ -1157,103 +1215,163 @@ def prepare_pfam_rdrps_rt(data_dir, threads, logger: logging.Logger):
             for hmm in hmms
         ]
     expected_hmms = {
-        (row["profile_name"], row["profile_accession"])
-        for row in pfam_profile_rows
+        (row["profile_name"], row["profile_accession"]) for row in pfam_profile_rows
     }
-    if len(built_hmms) != 13 or set(built_hmms) != expected_hmms:
-        raise ValueError("Built Pfam HMM members do not match the 13-row profile manifest")
+    expected_mmseqs_accessions = {row["profile_accession"] for row in pfam_profile_rows}
+    if len(built_hmms) != expected_profile_count or set(built_hmms) != expected_hmms:
+        raise ValueError(
+            "Built Pfam HMM members do not match the 16-row profile manifest"
+        )
 
     # MMseqs2's built-in Pfam downloader still uses EBI's retired FTP endpoint.
     # Download the pinned seed over HTTPS and reproduce its convertmsa/msa2profile
     # recipe while retaining the database path consumed by RolyPoly.
-    fetch_and_extract(
-        url=pfam_seed_url,
-        fetched_to=pfam_seed_path,
-        extract=False,
-        logger=logger,
-    )
     pfam_mmseqs_work = Path(hmmdb_dir) / "pfam_mmseqs_work"
     pfam_mmseqs_work.mkdir(parents=True, exist_ok=True)
     pfam_seed_msa = pfam_mmseqs_work / "pfam_seed_msa"
     pfam_seed_db = Path(mmseqs_dbs) / "pfam_a" / "pfam_a_38_seed"
     pfam_seed_db.parent.mkdir(parents=True, exist_ok=True)
-    if pfam_seed_msa.with_suffix(".dbtype").exists():
+    pfam_seed_version = Path(f"{pfam_seed_db}.version")
+    reuse_pfam_seed_db = (
+        pfam_seed_db.with_suffix(".dbtype").exists()
+        and Path(f"{pfam_seed_db}.index").exists()
+        and Path(f"{pfam_seed_db}_h").exists()
+        and Path(f"{pfam_seed_db}_h.index").exists()
+        and pfam_seed_version.exists()
+        and pfam_seed_version.read_text(encoding="utf-8").strip() == "Pfam 38.2"
+    )
+    if reuse_pfam_seed_db:
+        logger.info("Reusing the existing Pfam 38.2 MMseqs profile database")
+    else:
+        fetch_and_extract(
+            url=pfam_seed_url,
+            fetched_to=pfam_seed_path,
+            extract=False,
+            logger=logger,
+        )
+        if pfam_seed_msa.with_suffix(".dbtype").exists():
+            if not run_command_comp(
+                base_cmd="mmseqs rmdb",
+                positional_args=[str(pfam_seed_msa)],
+                positional_args_location="start",
+                check_output=False,
+                logger=logger,
+            ):
+                raise RuntimeError("Could not reset the temporary Pfam MSA database")
         if not run_command_comp(
-            base_cmd="mmseqs rmdb",
-            positional_args=[str(pfam_seed_msa)],
+            base_cmd="mmseqs convertmsa",
+            positional_args=[pfam_seed_path, str(pfam_seed_msa)],
             positional_args_location="start",
             check_output=False,
             logger=logger,
         ):
-            raise RuntimeError("Could not reset the temporary Pfam MSA database")
+            raise RuntimeError("MMseqs2 convertmsa failed for the Pfam seed")
+        if pfam_seed_db.with_suffix(".dbtype").exists():
+            if not run_command_comp(
+                base_cmd="mmseqs rmdb",
+                positional_args=[str(pfam_seed_db)],
+                positional_args_location="start",
+                check_output=False,
+                logger=logger,
+            ):
+                raise RuntimeError(
+                    "Could not remove the previous Pfam MMseqs2 database"
+                )
+        if not run_command_comp(
+            base_cmd="mmseqs msa2profile",
+            positional_args=[str(pfam_seed_msa), str(pfam_seed_db)],
+            positional_args_location="start",
+            params={"match-mode": 1, "match-ratio": 0.5, "threads": threads},
+            output_file=str(pfam_seed_db.with_suffix(".dbtype")),
+            logger=logger,
+        ):
+            raise RuntimeError("MMseqs2 msa2profile failed for the Pfam seed")
+        pfam_seed_version.write_text("Pfam 38.2\n", encoding="utf-8")
+    # Select the companion database directly from the pinned Pfam seed profiles.
+    # Fetching each family again here could silently mix a newer family MSA with
+    # the Pfam 38.2 HMM and full MMseqs database built above.
+    pfam_mmseqs_output = Path(mmseqs_dbs) / "pfam_rdrps_and_rts" / "pfam_rdrps_and_rts"
+    pfam_mmseqs_output.parent.mkdir(parents=True, exist_ok=True)
+    pfam_seed_header = Path(f"{pfam_seed_db}_h")
+    pfam_seed_header_index = Path(f"{pfam_seed_db}_h.index")
+    header_data = pfam_seed_header.read_bytes()
+    keys_by_accession = {}
+    for index_line in pfam_seed_header_index.read_text(encoding="utf-8").splitlines():
+        key, offset, length = map(int, index_line.split())
+        header = header_data[offset : offset + length].rstrip(b"\0\n").decode("utf-8")
+        accession = header.split(maxsplit=1)[0]
+        if accession in expected_mmseqs_accessions:
+            if accession in keys_by_accession:
+                raise ValueError(f"Duplicate Pfam MMseqs accession: {accession}")
+            keys_by_accession[accession] = key
+    if set(keys_by_accession) != expected_mmseqs_accessions:
+        missing_accessions = expected_mmseqs_accessions - set(keys_by_accession)
+        raise ValueError(
+            "Pinned Pfam MMseqs database lacks selected accessions: "
+            f"{sorted(missing_accessions)}"
+        )
+
+    selected_keys_path = pfam_mmseqs_work / "rdrp_rt_profile_keys.txt"
+    selected_keys_path.write_text(
+        "".join(
+            f"{keys_by_accession[row['profile_accession']]}\n"
+            for row in pfam_profile_rows
+        ),
+        encoding="utf-8",
+    )
+    if pfam_mmseqs_output.with_suffix(".dbtype").exists():
+        if not run_command_comp(
+            base_cmd="mmseqs rmdb",
+            positional_args=[str(pfam_mmseqs_output)],
+            positional_args_location="start",
+            check_output=False,
+            logger=logger,
+        ):
+            raise RuntimeError("Could not reset the selected Pfam MMseqs database")
     if not run_command_comp(
-        base_cmd="mmseqs convertmsa",
-        positional_args=[pfam_seed_path, str(pfam_seed_msa)],
+        base_cmd="mmseqs createsubdb",
+        positional_args=[
+            str(selected_keys_path),
+            str(pfam_seed_db),
+            str(pfam_mmseqs_output),
+        ],
         positional_args_location="start",
         check_output=False,
         logger=logger,
     ):
-        raise RuntimeError("MMseqs2 convertmsa failed for the Pfam seed")
-    if pfam_seed_db.with_suffix(".dbtype").exists():
-        if not run_command_comp(
-            base_cmd="mmseqs rmdb",
-            positional_args=[str(pfam_seed_db)],
-            positional_args_location="start",
-            check_output=False,
-            logger=logger,
-        ):
-            raise RuntimeError("Could not remove the previous Pfam MMseqs2 database")
+        raise RuntimeError("Could not select the Pfam RdRp/RT MMseqs profiles")
+
+    # createsubdb links the full header DB by default. Replace those links with
+    # the matching small header subset so the shipped database is self-contained.
+    for suffix in ("_h", "_h.dbtype", "_h.index"):
+        Path(f"{pfam_mmseqs_output}{suffix}").unlink(missing_ok=True)
     if not run_command_comp(
-        base_cmd="mmseqs msa2profile",
-        positional_args=[str(pfam_seed_msa), str(pfam_seed_db)],
+        base_cmd="mmseqs createsubdb",
+        positional_args=[
+            str(selected_keys_path),
+            str(pfam_seed_header),
+            f"{pfam_mmseqs_output}_h",
+        ],
         positional_args_location="start",
-        params={"match-mode": 1, "match-ratio": 0.5, "threads": threads},
-        output_file=str(pfam_seed_db.with_suffix(".dbtype")),
+        check_output=False,
         logger=logger,
     ):
-        raise RuntimeError("MMseqs2 msa2profile failed for the Pfam seed")
-    Path(str(pfam_seed_db) + ".version").write_text(
-        "Pfam 38.2\n", encoding="utf-8"
-    )
-    # TODO: Filter the pfam_A mmseqs db to remove "hypothetical protein" + similar entries?
+        raise RuntimeError("Could not select the Pfam RdRp/RT MMseqs headers")
 
-    from rolypoly.utils.bio.alignments import fetchPfamMSA
-
-    # fetch Pfam MSAs for these accessions
-    pfam_msa_folder = os.path.join(hmmdb_dir, "pfam_msas")
-    if os.path.exists(pfam_msa_folder):
-        shutil.rmtree(pfam_msa_folder)
-    os.makedirs(pfam_msa_folder)
-    for acc in [row["profile_accession_base"] for row in pfam_profile_rows]:
-        fetchPfamMSA(acc=acc, output_folder=pfam_msa_folder, logger=logger)
-        logger.info(f"Fetched MSA for Pfam accession {acc}")
-    # build mmseqs profile db from these msas
-    mmseqs_profile_db_from_directory(
-        msa_dir=pfam_msa_folder,
-        output=os.path.join(mmseqs_dbs, "pfam_rdrps_and_rts/pfam_rdrps_and_rts"),
-        msa_pattern="*.sth",
-        info_table=None,
-        threads=threads,
-    )
-    pfam_mmseqs_output = Path(mmseqs_dbs) / "pfam_rdrps_and_rts" / "pfam_rdrps_and_rts"
     mmseqs_headers = {
         entry.split(maxsplit=1)[0]
         for entry in Path(f"{pfam_mmseqs_output}_h").read_bytes().split(b"\0")
         if entry.strip()
     }
     mmseqs_headers = {header.decode() for header in mmseqs_headers}
-    expected_mmseqs_headers = {row["mmseqs_target"] for row in pfam_profile_rows}
-    if mmseqs_headers != expected_mmseqs_headers:
-        raise ValueError("Built Pfam MMseqs members do not match the 13-row profile manifest")
+    if mmseqs_headers != expected_mmseqs_accessions:
+        raise ValueError(
+            "Built Pfam MMseqs members do not match the 16-row profile manifest"
+        )
 
-    # clean up downloaded gz
-    try:
-        os.remove(pfam_gz_path)
-        os.remove(pfam_seed_path)
-        shutil.rmtree(pfam_mmseqs_work)
-
-    except Exception:
-        pass
+    Path(pfam_gz_path).unlink(missing_ok=True)
+    Path(pfam_seed_path).unlink(missing_ok=True)
+    shutil.rmtree(pfam_mmseqs_work, ignore_errors=True)
 
     logger.debug("Finished preparing pfam and pfam rdrps+rts sub-database")
 
@@ -1275,39 +1393,62 @@ def prepare_neordrp_profiles(data_dir, threads, logger: logging.Logger):
     os.unlink(neordrp_path)
 
 
-def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
-    """Prepare RVMT RdRp profile + annotation db (NVPC)."""
-    logger.info("Preparing RVMT HMM and MMseqs databases")
-    rvmt_url = "https://portal.nersc.gov/dna/microbial/prokpubs/Riboviria/RiboV1.4/Alignments/zip.ali.220515.tgz"
-    rvmt_path = os.path.join(hmmdb_dir, "zip.ali.220515.tgz")
-    fetch_and_extract(
-        url=rvmt_url,
-        fetched_to=rvmt_path,
-        extract_to=os.path.join(hmmdb_dir, "RVMT/"),
-    )
-    hmmdb_from_directory(
-        msa_dir=os.path.join(hmmdb_dir, "RVMT/"),
-        output=os.path.join(hmmdb_dir, "rvmt.hmm"),
-        msa_pattern="ali*/*.FASTA",
-        info_table=None,
-        default_description="RdRp"
-    )
+def prepare_RVMT_profiles(
+    data_dir,
+    threads,
+    logger: logging.Logger,
+    *,
+    features_only=False,
+):
+    """Prepare RVMT profiles, or recompile features from existing profiles."""
+    if features_only:
+        logger.info("Compiling RVMT features from existing profile artifacts")
+    else:
+        logger.info("Preparing RVMT HMM and MMseqs databases")
+        rvmt_url = "https://portal.nersc.gov/dna/microbial/prokpubs/Riboviria/RiboV1.4/Alignments/zip.ali.220515.tgz"
+        rvmt_path = os.path.join(hmmdb_dir, "zip.ali.220515.tgz")
+        fetch_and_extract(
+            url=rvmt_url,
+            fetched_to=rvmt_path,
+            extract_to=os.path.join(hmmdb_dir, "RVMT/"),
+        )
+        hmmdb_from_directory(
+            msa_dir=os.path.join(hmmdb_dir, "RVMT/"),
+            output=os.path.join(hmmdb_dir, "rvmt.hmm"),
+            msa_pattern="ali*/*.FASTA",
+            info_table=None,
+            default_description="RdRp",
+        )
 
-    mmseqs_profile_db_from_directory(
-        msa_dir=os.path.join(hmmdb_dir, "RVMT/"),
-        output=os.path.join(mmseqs_dbs, "RVMT/RVMT"),
-        msa_pattern="ali*/*.FASTA",
-        info_table=None,
-    )
+        mmseqs_profile_db_from_directory(
+            msa_dir=os.path.join(hmmdb_dir, "RVMT/"),
+            output=os.path.join(mmseqs_dbs, "RVMT/RVMT"),
+            msa_pattern="ali*/*.FASTA",
+            info_table=None,
+        )
 
-    # Compile reviewed sparse features from NCBI CDD v3.21 fasta.tar.gz and
-    # cddannot.dat.gz (https://ftp.ncbi.nlm.nih.gov/pub/mmdb/cdd/) onto the two
-    # freshly built backend coordinate systems. The source table deliberately
-    # stops at original RVMT MSA columns; backend state numbers are always
-    # regenerated here. CDD root IDs remain in the table as the compact
-    # build-time provenance trail.
-    source_features_path = Path(__file__).with_name("rvmt_cdd_source_features.tsv")
-    source_features = pl.read_csv(source_features_path, separator="\t")
+    # Compile reviewed sparse features onto both freshly built backend
+    # coordinate systems. Source tables stop at original RVMT MSA columns;
+    # backend state numbers are always regenerated here.
+    cdd_source_path = Path(__file__).with_name("rvmt_cdd_source_features.tsv")
+    structural_source_path = Path(__file__).with_name(
+        "rvmt_structural_source_features.tsv"
+    )
+    cdd_source_features = pl.read_csv(cdd_source_path, separator="\t").with_columns(
+        pl.lit("cdd_conserved_domain_transfer").alias("source_kind"),
+        pl.col("cdd_root_profiles").alias("source_accessions"),
+        pl.lit("").alias("source_anchor_feature"),
+        pl.lit(
+            "NCBI CDD v3.21 conserved-feature transfer onto the RVMT source MSA"
+        ).alias("source_evidence"),
+    )
+    structural_source_features = pl.read_csv(
+        structural_source_path, separator="\t"
+    ).with_columns(pl.lit("").alias("cdd_root_profiles"))
+    source_features = pl.concat(
+        [cdd_source_features, structural_source_features],
+        how="diagonal_relaxed",
+    )
     required_feature_columns = {
         "profile_id",
         "feature_id",
@@ -1315,6 +1456,10 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
         "raw_source_label",
         "source_msa_columns_1based",
         "cdd_root_profiles",
+        "source_kind",
+        "source_accessions",
+        "source_anchor_feature",
+        "source_evidence",
         "mean_feature_coverage",
         "mean_residue_compatibility",
         "confidence",
@@ -1323,12 +1468,12 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
     missing_feature_columns = required_feature_columns - set(source_features.columns)
     if missing_feature_columns:
         raise ValueError(
-            f"RVMT CDD source table lacks columns: {sorted(missing_feature_columns)}"
+            f"RVMT source feature tables lack columns: {sorted(missing_feature_columns)}"
         )
     if source_features.select(
         pl.struct(["profile_id", "feature_id"]).is_duplicated().any()
     ).item():
-        raise ValueError("RVMT CDD source table contains duplicate profile/feature rows")
+        raise ValueError("RVMT source tables contain duplicate profile/feature rows")
     features_by_profile = {}
     for row in source_features.to_dicts():
         features_by_profile.setdefault(row["profile_id"], []).append(row)
@@ -1398,7 +1543,7 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
     unknown_feature_profiles = set(features_by_profile) - set(rvmt_hmms)
     if unknown_feature_profiles:
         raise ValueError(
-            "CDD labels refer to absent RVMT profiles: "
+            "Source features refer to absent RVMT profiles: "
             f"{sorted(unknown_feature_profiles)[:5]}"
         )
 
@@ -1549,6 +1694,10 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
                         map(str, unmapped_hmmer_states)
                     ),
                     "cdd_root_profiles": feature["cdd_root_profiles"],
+                    "source_kind": feature["source_kind"],
+                    "source_accessions": feature["source_accessions"],
+                    "source_anchor_feature": feature["source_anchor_feature"],
+                    "source_evidence": feature["source_evidence"],
                     "mean_feature_coverage": feature["mean_feature_coverage"],
                     "mean_residue_compatibility": feature[
                         "mean_residue_compatibility"
@@ -1582,7 +1731,7 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
         stockholm_lines = [
             "# STOCKHOLM 1.0",
             f"#=GF ID {profile_id}",
-            "#=GF CC Sparse CDD-derived RdRp feature tracks on the RVMT source MSA",
+            "#=GF CC Sparse source-qualified RdRp features on the RVMT source MSA",
         ]
         for stockholm_name, (_, sequence) in zip(stockholm_names, records):
             clean_sequence = sequence.replace(".", "-").replace("*", "X")
@@ -1597,10 +1746,13 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
         )
         for motif in sorted(feature_columns):
             motif_track = ["."] * msa_width
+            # Each alignment column takes exactly one character; the feature
+            # identity is carried by the track name for multi-character labels.
+            mark = motif if len(motif) == 1 else "x"
             for source_column in feature_columns[motif]:
-                motif_track[source_column - 1] = motif
+                motif_track[source_column - 1] = mark
             stockholm_lines.append(
-                f"#=GC {('CDD_' + motif).ljust(max(1, name_width - 5))} "
+                f"#=GC {('FEATURE_' + motif).ljust(max(1, name_width - 5))} "
                 f"{''.join(motif_track)}"
             )
         stockholm_lines.append("//")
@@ -1610,19 +1762,136 @@ def prepare_RVMT_profiles(data_dir, threads, logger: logging.Logger):
 
     if len(marker_feature_rows) != source_features.height:
         raise ValueError(
-            "Not every reviewed RVMT CDD feature was compiled: "
+            "Not every reviewed RVMT source feature was compiled: "
             f"{len(marker_feature_rows)} of {source_features.height}"
         )
-    pl.DataFrame(marker_feature_rows).write_csv(
+
+    # Pfam companion features are given directly as Pfam HMM states, so only the
+    # MMseqs side needs a consensus bridge. Run the `pfam` step first.
+    pfam_hmm_path = Path(hmmdb_dir) / "pfam_rdrps_and_rts.hmm"
+    pfam_mmseqs_prefix = Path(mmseqs_dbs) / "pfam_rdrps_and_rts" / "pfam_rdrps_and_rts"
+    pfam_features = pl.read_csv(
+        Path(__file__).with_name("pfam_structural_source_features.tsv"),
+        separator="\t",
+    )
+    pfam_hmm_consensus = {}
+    with pyhmmer.plan7.HMMFile(pfam_hmm_path) as hmm_file:
+        for hmm in hmm_file:
+            accession = hmm.accession
+            accession = (
+                accession.decode() if isinstance(accession, bytes) else str(accession)
+            )
+            pfam_hmm_consensus[accession] = hmm.consensus.upper()
+    if len(pfam_hmm_consensus) != 16:
+        raise ValueError(
+            f"Expected the 16-profile Pfam companion HMM, found {len(pfam_hmm_consensus)}; "
+            "run the pfam step before rvmt-features"
+        )
+    with tempfile.TemporaryDirectory(prefix="rolypoly-pfam-features-") as temp_dir:
+        pfam_consensus_db = Path(temp_dir) / "pfam_consensus"
+        pfam_consensus_fasta = Path(temp_dir) / "pfam_consensus.faa"
+        if not run_command_comp(
+            base_cmd="mmseqs profile2consensus",
+            positional_args=[str(pfam_mmseqs_prefix), str(pfam_consensus_db)],
+            positional_args_location="start",
+            params={"threads": min(threads, 6)},
+            output_file=str(pfam_consensus_db),
+            logger=logger,
+        ) or not run_command_comp(
+            base_cmd="mmseqs convert2fasta",
+            positional_args=[str(pfam_consensus_db), str(pfam_consensus_fasta)],
+            positional_args_location="start",
+            output_file=str(pfam_consensus_fasta),
+            logger=logger,
+        ):
+            raise RuntimeError("MMseqs2 could not export the Pfam companion consensuses")
+        pfam_mmseqs_consensus = {
+            header.split()[0]: sequence.upper()
+            for header, sequence in from_fastx_eager(pfam_consensus_fasta)
+            .select("header", "sequence")
+            .iter_rows()
+        }
+    if set(pfam_mmseqs_consensus) != set(pfam_hmm_consensus):
+        raise ValueError("Pfam companion MMseqs and HMM profile inventories differ")
+    expected_residues = {"A_D1": "D", "C_SDD": "SDD"}
+    for feature in pfam_features.iter_rows(named=True):
+        profile_id = feature["profile_id"]
+        if profile_id not in pfam_hmm_consensus:
+            raise ValueError(f"Pfam source feature names an absent profile: {profile_id}")
+        hmmer_states = [int(v) for v in feature["hmmer_states_1based"].split(";")]
+        consensus = pfam_hmm_consensus[profile_id]
+        if max(hmmer_states) > len(consensus) or "".join(
+            consensus[state - 1] for state in hmmer_states
+        ) != expected_residues[feature["source_anchor_feature"]]:
+            raise ValueError(
+                f"{profile_id}/{feature['feature_id']}: HMM consensus does not carry the "
+                "expected catalytic residues at the stated states"
+            )
+        traceback = parasail.nw_trace_scan_16(
+            consensus, pfam_mmseqs_consensus[profile_id], 10, 1, parasail.blosum62
+        ).traceback
+        hmm_position = mmseqs_position = aligned_pairs = identical_pairs = 0
+        hmm_to_mmseqs = {}
+        for hmm_residue, mmseqs_residue in zip(traceback.query, traceback.ref):
+            hmm_position += hmm_residue != "-"
+            mmseqs_position += mmseqs_residue != "-"
+            if hmm_residue != "-" and mmseqs_residue != "-":
+                hmm_to_mmseqs[hmm_position] = mmseqs_position
+                aligned_pairs += 1
+                identical_pairs += hmm_residue.upper() == mmseqs_residue.upper()
+        if hmm_position != len(consensus) or mmseqs_position != len(
+            pfam_mmseqs_consensus[profile_id]
+        ):
+            raise ValueError(f"{profile_id}: consensus bridge did not consume both profiles")
+        mmseqs_states = [hmm_to_mmseqs[s] for s in hmmer_states if s in hmm_to_mmseqs]
+        unmapped = [s for s in hmmer_states if s not in hmm_to_mmseqs]
+        if unmapped or "".join(
+            pfam_mmseqs_consensus[profile_id][s - 1] for s in mmseqs_states
+        ) != expected_residues[feature["source_anchor_feature"]]:
+            raise ValueError(
+                f"{profile_id}/{feature['feature_id']}: MMseqs bridge does not reproduce "
+                "the catalytic residues"
+            )
+        marker_feature_rows.append(
+            {
+                "marker_db": "pfam_rts_rdrp",
+                "profile_id": profile_id,
+                "feature_id": feature["feature_id"],
+                "canonical_term_id": feature["canonical_term_id"],
+                "raw_source_label": feature["raw_source_label"],
+                "source_msa_columns_1based": "",
+                "hmmer_states_1based": feature["hmmer_states_1based"],
+                "unmapped_source_msa_columns_1based": "",
+                "mmseqs_states_1based": ";".join(map(str, mmseqs_states)),
+                "unmapped_hmmer_states_for_mmseqs": "",
+                "cdd_root_profiles": "",
+                "source_kind": feature["source_kind"],
+                "source_accessions": feature["source_accessions"],
+                "source_anchor_feature": feature["source_anchor_feature"],
+                "source_evidence": feature["source_evidence"],
+                "mean_feature_coverage": feature["mean_feature_coverage"],
+                "mean_residue_compatibility": None,
+                "confidence": feature["confidence"],
+                "definition_status": feature["definition_status"],
+                "hmm_mmseqs_consensus_identity": round(
+                    identical_pairs / aligned_pairs, 4
+                ),
+                "hmmer_mapping_status": "complete",
+                "mmseqs_mapping_status": "complete",
+            }
+        )
+    pl.DataFrame(marker_feature_rows, infer_schema_length=None).write_csv(
         Path(profile_dir) / "marker_features.tsv.gz",
         separator="\t",
         compression="gzip",
     )
     logger.info(
-        "Wrote %s reviewed RVMT feature rows and %s annotated Stockholm MSAs",
+        "Wrote %s reviewed RVMT source-feature rows and %s annotated Stockholm MSAs",
         len(marker_feature_rows),
         len(rvmt_hmms),
     )
+    if features_only:
+        return
 
     # now for nvpc
     fetch_and_extract(

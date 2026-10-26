@@ -48,6 +48,29 @@ or GitHub might also be used, unless the local repo of the -tk in the sister fol
 these paths must be coordinated with the RolyPoly runtime before publishing a
 new data bundle.
 
+The current focused profile refresh is:
+
+```bash
+PYTHONPATH=src python -m rolypoly_db.build_data \
+  --data-dir ../rolypoly/data --threads 6 \
+  --step rvmt-features --step pfam
+```
+
+`rvmt-features` recompiles the RVMT feature sidecar and annotated source MSAs
+from profiles already present under the data root, and adds the Pfam companion
+rows from `pfam_structural_source_features.tsv` (single-Asp motif A and motif C
+for `Arena_RNA_pol` and `Flu_PB1`, checked against each profile's consensus). It
+does not download or rebuild the RVMT HMMER/MMseqs2 databases. `pfam` builds the
+pinned Pfam 38.2 companion set: 13 RdRp profiles and three RT profiles, including
+`Arena_RNA_pol`, `Flu_PB1`, and `Mononeg_RNA_pol`; it runs before the RVMT steps
+because feature compilation reads its products. Generated products remain
+excluded from Git and need command-level validation before bundling.
+
+The motif-profile recipe compiler is currently validated in the sibling
+`rdrp-motif-experiment` repository. Its production destination is this package;
+RolyPoly will remain the bundle consumer. Candidate Orp, ambivirus, and
+Splipalm profiles are still experimental and are not part of the default build.
+
 ### Rfam models and family typing
 
 The `rfam` step pins covariance models and curated family metadata to Rfam 15.1.
